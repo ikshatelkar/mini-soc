@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini SOC Monitoring System</title>
+    <!-- Dark Mode CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <!-- Plotly CDN for Charts -->
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header class="soc-header">
+        <div class="header-title">
+            <span class="pulse-dot"></span>
+            <h1>Mini SOC Dashboard</h1>
+        </div>
+        <div class="header-actions">
+            <button onclick="window.location.href='/api/export'" class="btn-export">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                Export CSV
+            </button>
+        </div>
+    </header>
+
+    <main class="soc-container">
+        <!-- Top Stats Cards -->
+        <div class="stats-row">
+            <div class="stat-card">
+                <h3>Total Alerts Delivered</h3>
+                <h2 id="total-alerts-count">0</h2>
+            </div>
+            <div class="stat-card critical">
+                <h3>High/Critical Threats</h3>
+                <h2 id="critical-alerts-count">0</h2>
+            </div>
+            <div class="stat-card FIM">
+                <h3>Integrity Violations</h3>
+                <h2 id="fim-alerts-count">0</h2>
+            </div>
+        </div>
+
+        <!-- Charts Row -->
+        <div class="charts-row">
+            <div class="chart-container" id="alerts-by-type-pie-container">
+                <div id="alerts-by-type-pie"></div>
+            </div>
+            <div class="chart-container" id="alerts-by-severity-bar-container">
+                <div id="alerts-by-severity-bar"></div>
+            </div>
+        </div>
+
+        <!-- Alerts Table Section -->
+        <div class="alerts-table-section">
+            <div class="table-header">
+                <h2>Real-Time Anomaly Log</h2>
+                <div class="live-indicator">Tracking Live Activity...</div>
+            </div>
+            <table class="soc-table">
+                <thead>
+                    <tr>
+                        <th>Timestamp (Local)</th>
+                        <th>Module</th>
+                        <th>Severity</th>
+                        <th>Detection Synopsis</th>
+                    </tr>
+                </thead>
+                <tbody id="alerts-table-body">
+                    <!-- Javascript populates table rows -->
+                </tbody>
+            </table>
+        </div>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

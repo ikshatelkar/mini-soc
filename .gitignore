@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# SQLite database (contains your personal alert history)
+*.db
+
+# Log files (may contain sensitive server data)
+logs/dummy_auth.log
+
+# VS Code / IDE settings
+.vscode/
+.pyre_configuration
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Export files
+alerts_export.csv
