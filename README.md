@@ -23,6 +23,13 @@ The log parser acts exactly like an enterprise SIEM (like Splunk), designed to r
   * **Brute Force Attacks (CRITICAL):** Flags when the same IP fails to login 5 times within a 5-minute window.
   * **Unusual Access Times (MEDIUM):** Flags when a successful login occurs drastically outside normal business hours (e.g., between 10 PM and 6 AM).
 
+### 4. IP Geolocation Tracer
+Every detected threat is automatically enriched with physical location data in real-time.
+* **How it works:** When a remote IP is flagged (e.g., by a brute-force attempt), the SOC performs a background traceback using the `ip-api` service.
+* **What it provides:**
+  * **Visual Mapping:** Pins the attacker's location on an interactive global dashboard map.
+  * **Metadata Enrichment:** Captures the attacker's country, city, and ISP (Internet Service Provider).
+
 ---
 
 ## 🚨 Live Notification Engine
@@ -34,8 +41,8 @@ If an event triggers across **any** module, the system immediately bypasses the 
 
 ## 📊 The Central Command Dashboard
 The project leverages a **Flask** web server to host a real-time command center interface.
-* **Database:** All localized alerts and baseline file hashes are stored in a lightweight `mini_soc.db` SQLite database.
-* **Frontend:** The frontend UI is built using HTML, CSS, and Vanilla JavaScript. It uses `Chart.js` to render live threat analytics.
+* **Database:** All localized alerts, baseline file hashes, and geolocation data are stored in a lightweight `mini_soc.db` SQLite database.
+* **Frontend:** The frontend UI is built using HTML, CSS, and Vanilla JavaScript. It uses `Chart.js` for analytics and `Plotly` to render the **Real-Time Attacker World Map**.
 * **Polling:** The web browser automatically polls the Flask API router every 3 seconds to ensure the human operator is always viewing a real-time, up-to-the-second layout of the battlefield.
 
 ---
