@@ -8,8 +8,19 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, 'dummy_auth.log')
 
-USERS = ['root', 'admin', 'user1', 'guest']
-IPS = ['192.168.1.10', '192.168.1.15', '10.0.0.5', '203.0.113.42'] # Includes an external-looking IP
+USERS = ['root', 'admin', 'user1', 'guest', 'ubuntu', 'pi', 'test']
+
+# Realistic public IPs from common attack-origin countries for mapping
+IPS = [
+    '185.220.101.34',   # Russia (Tor exit node range)
+    '103.75.190.12',    # China
+    '177.54.144.79',    # Brazil
+    '91.108.56.200',    # Germany
+    '185.117.75.218',   # Iran
+    '175.45.176.11',    # North Korea range
+    '45.33.32.156',     # USA (Linode)
+    '104.244.72.115',   # USA (Twitter range - simulates compromised infra)
+]
 
 def generate_log_entry():
     """Generates synthetic auth.log entries with occasional attacks."""

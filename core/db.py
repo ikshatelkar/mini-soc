@@ -2,6 +2,7 @@ import sqlite3
 import os
 import csv
 from datetime import datetime
+from core.ip_tracer import geolocate_ip  # type: ignore
 
 # Initialize database in the root of the project
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'mini_soc.db')
@@ -23,9 +24,29 @@ def init_db():
             module TEXT,
             alert_type TEXT,
             severity TEXT,
-            description TEXT
+            description TEXT,
+            source_ip TEXT,
+            geo_country TEXT,
+            geo_city TEXT,
+            geo_isp TEXT,
+            geo_lat REAL,
+            geo_lon REAL
         )
     ''')
+
+    # Migration: add geo columns to existing databases that pre-date this feature
+    geo_columns = [
+        ('source_ip',   'TEXT'),
+        ('geo_country', 'TEXT'),
+        ('geo_city',    'TEXT'),
+        ('geo_isp',     'TEXT'),
+        ('geo_lat',     'REAL'),
+        ('geo_lon',     'REAL'),
+    ]
+    existing = {row[1] for row in c.execute("PRAGMA table_info(alerts)").fetchall()}
+    for col_name, col_type in geo_columns:
+        if col_name not in existing:
+            c.execute(f'ALTER TABLE alerts ADD COLUMN {col_name} {col_type}')
     
     # FIM Baselines Table: Stores the core hash of monitored files
     c.execute('''
@@ -40,14 +61,26 @@ def init_db():
     conn.commit()
     conn.close()
 
-def log_alert(module, alert_type, severity, description):
-    """Log an alert into the database and push a Windows notification."""
+def log_alert(module, alert_type, severity, description, source_ip=None):
+    """Log an alert into the database, enrich with geo data, and push a Windows notification."""
+    # Geolocate the source IP if provided
+    geo = geolocate_ip(source_ip) if source_ip else None
+
     conn = get_connection()
     c = conn.cursor()
     c.execute('''
-        INSERT INTO alerts (module, alert_type, severity, description)
-        VALUES (?, ?, ?, ?)
-    ''', (module, alert_type, severity, description))
+        INSERT INTO alerts (module, alert_type, severity, description,
+                            source_ip, geo_country, geo_city, geo_isp, geo_lat, geo_lon)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        module, alert_type, severity, description,
+        source_ip,
+        geo['country'] if geo else None,
+        geo['city']    if geo else None,
+        geo['isp']     if geo else None,
+        geo['lat']     if geo else None,
+        geo['lon']     if geo else None,
+    ))
     conn.commit()
     conn.close()
 

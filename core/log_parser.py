@@ -45,7 +45,7 @@ def parse_log_line(line):
         # Detect Brute Force (>5 attempts in 5 minutes)
         if len(failed_attempts[ip]) >= 5:
             description = f"Brute force detected from {ip} targeting {user} ({len(failed_attempts[ip])} fails)"
-            log_alert('LOG_MONITOR', 'Brute Force Attack', 'CRITICAL', description)
+            log_alert('LOG_MONITOR', 'Brute Force Attack', 'CRITICAL', description, source_ip=ip)
             # Clear IP to prevent duplicate alerts for the same burst
             failed_attempts[ip] = []
             
@@ -54,7 +54,7 @@ def parse_log_line(line):
         hour = log_time.hour
         if hour < 6 or hour >= 22:
             description = f"Unusual access time ({hour:02d}:00) by {user} from {ip}"
-            log_alert('LOG_MONITOR', 'Unusual Access', 'MEDIUM', description)
+            log_alert('LOG_MONITOR', 'Unusual Access', 'MEDIUM', description, source_ip=ip)
 
 def start_log_monitor():
     """Tails the log file continuously and parses new entries."""

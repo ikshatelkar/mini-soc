@@ -42,8 +42,18 @@ async function fetchAlerts() {
     }
 }
 
+async function fetchGeoMap() {
+    try {
+        const response = await fetch('/api/geomap');
+        const geoData = await response.json();
+        renderWorldMap(geoData);
+        document.getElementById('geo-origins-count').innerText = geoData.length;
+    } catch (err) {
+        console.error("Error fetching geo map:", err);
+    }
+}
+
 function updateTopStats(alerts) {
-    // Animate counter logic could be added here, but direct assignment works for now
     document.getElementById('total-alerts-count').innerText = alerts.length;
     
     const criticalCount = alerts.filter(a => a.severity === 'CRITICAL' || a.severity === 'HIGH').length;
@@ -79,7 +89,6 @@ function renderCharts(stats) {
     const sevLabels = Object.keys(severities);
     const sevValues = Object.values(severities);
 
-    // Order severities logically
     const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
     sevLabels.sort((a, b) => order.indexOf(a) - order.indexOf(b));
     const sortedValues = sevLabels.map(s => severities[s]);
@@ -102,37 +111,82 @@ function renderCharts(stats) {
     Plotly.react('alerts-by-severity-bar', barData, barLayout, {displayModeBar: false, responsive: true});
 }
 
+function renderWorldMap(geoData) {
+    if (!geoData || geoData.length === 0) {
+        document.getElementById('map-status').innerText = "No external threats mapped yet.";
+        return;
+    }
+    document.getElementById('map-status').innerText = `Mapping ${geoData.length} unique attack origins...`;
+
+    const data = [{
+        type: 'scattergeo',
+        mode: 'markers',
+        lat: geoData.map(d => d.geo_lat),
+        lon: geoData.map(d => d.geo_lon),
+        text: geoData.map(d => `${d.source_ip}<br>${d.geo_city}, ${d.geo_country}<br>${d.geo_isp}<br>Alerts: ${d.hit_count}`),
+        marker: {
+            size: geoData.map(d => Math.log2(d.hit_count + 1) * 8 + 5),
+            color: geoData.map(d => colorMap[d.severity] || '#64748b'),
+            line: { color: '#111827', width: 1 },
+            opacity: 0.8
+        }
+    }];
+
+    const layout = {
+        ...chartLayoutDefaults,
+        geo: {
+            projection: { type: 'robinson' },
+            bgcolor: 'rgba(0,0,0,0)',
+            showland: true,
+            landcolor: '#1e293b',
+            showocean: true,
+            oceancolor: '#0f172a',
+            showlakes: false,
+            showcountries: true,
+            countrycolor: '#334155'
+        },
+        margin: { t: 0, b: 0, l: 0, r: 0 }
+    };
+
+    Plotly.react('attack-world-map', data, layout, {displayModeBar: false, responsive: true});
+}
+
 function updateTable(alerts) {
     const tbody = document.getElementById('alerts-table-body');
     tbody.innerHTML = ''; 
 
     if (alerts.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color: #94a3b8">No anomalies detected yet. Listening...</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color: #94a3b8">No anomalies detected yet. Listening...</td></tr>`;
         return;
     }
 
     alerts.forEach(alert => {
         const tr = document.createElement('tr');
         
+        const origin = alert.geo_country ? `\u{1F30D} ${alert.geo_city}, ${alert.geo_country}` : (alert.source_ip || 'Internal');
+        const isp = alert.geo_isp || 'N/A';
+
         tr.innerHTML = `
             <td style="color: #94a3b8">${alert.timestamp}</td>
             <td><strong>${alert.module}</strong></td>
             <td><span class="sev-badge sev-${alert.severity}">${alert.severity}</span></td>
             <td><span style="opacity: 0.9">${alert.description}</span></td>
+            <td><span style="font-size: 0.9em">${origin}</span></td>
+            <td><span style="font-size: 0.85em; color: #64748b">${isp}</span></td>
         `;
         tbody.appendChild(tr);
     });
 }
 
 function initDashboard() {
-    // Initial fetch
     fetchStats();
     fetchAlerts();
+    fetchGeoMap();
     
-    // Setup polling
     setInterval(() => {
         fetchStats();
         fetchAlerts();
+        fetchGeoMap();
     }, FETCH_INTERVAL);
 }
 

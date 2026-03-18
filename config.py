@@ -1,7 +1,7 @@
 import os
 
 # Set to True to generate fake logs for testing. Set to False for real-world use.
-USE_DUMMY_DATA = False
+USE_DUMMY_DATA = True
 
 # The directory you want to monitor for file changes.
 # Recommended Windows Paths:

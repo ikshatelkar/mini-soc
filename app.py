@@ -49,6 +49,25 @@ def api_stats():
     """JSON endpoint for dashboard visualization stats."""
     return jsonify(get_alert_stats())
 
+@app.route('/api/geomap')
+def api_geomap():
+    """JSON endpoint returning alerts with valid geolocation data for the world map."""
+    from core.db import get_connection  # type: ignore
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT source_ip, geo_country, geo_city, geo_isp, geo_lat, geo_lon,
+               severity, alert_type, COUNT(*) as hit_count
+        FROM alerts
+        WHERE geo_lat IS NOT NULL AND geo_lon IS NOT NULL
+        GROUP BY source_ip
+        ORDER BY hit_count DESC
+        LIMIT 100
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return jsonify(rows)
+
 @app.route('/api/export')
 def api_export():
     """Endpoint to export DB to CSV and download it."""
