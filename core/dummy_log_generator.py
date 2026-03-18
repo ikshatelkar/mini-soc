@@ -41,14 +41,14 @@ def generate_log_entry():
     elif event_type == 'failed':
         lines.append(f"{timestamp} server sshd[1234]: Failed password for {user} from {ip} port 50000 ssh2")
     elif event_type == 'brute_force':
-        attacker_ip = '198.51.100.99' # specific attacker IP
+        attacker_ip = random.choice(IPS) # Use a realistic public IP
         # Generate 6 rapid failures
         for _ in range(6):
             lines.append(f"{timestamp} server sshd[1234]: Failed password for admin from {attacker_ip} port 50000 ssh2")
     elif event_type == 'unusual_hours':
         # Force a 3 AM login timestamp
         ts_unusual = datetime.now().replace(hour=3, minute=random.randint(0, 59)).strftime('%b %d %H:%M:%S')
-        attacker_ip = '203.0.113.42'
+        attacker_ip = random.choice(IPS)
         lines.append(f"{ts_unusual} server sshd[1234]: Accepted password for root from {attacker_ip} port 50000 ssh2")
             
     with open(LOG_FILE, 'a') as f:
