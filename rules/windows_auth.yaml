@@ -1,0 +1,339 @@
+# Windows authentication and account detections (Security channel).
+#
+# These require the Security event log channel, which needs administrator
+# privileges. Run Mini SOC unelevated and they load but collect nothing -
+# /api/health reports the channel as access_denied.
+#
+# Field reference for these rules:
+#   event_id                 numeric Windows Event ID
+#   channel                  'Security'
+#   source_ip                routable IP if the event carried one, else null
+#   origin                   best available source identifier (IP, workstation, or 'local')
+#   data.<Name>              any <Data Name="..."> field from the event
+#   is_noise_account         true for machine ($) and built-in service accounts
+#   is_off_hours             true when outside config.BUSINESS_HOURS, local time
+#   is_remote_logon          true for logon types 3, 8 and 10
+
+rules:
+
+  - id: WIN-AUTH-BRUTE-FORCE
+    title: Brute Force Attack
+    source: winevt
+    severity: HIGH
+    technique: T1110
+    match:
+      channel: Security
+      event_id: 4625
+    # Repeated failures against ONE account from ONE source.
+    correlate:
+      type: threshold
+      count: 5
+      window_seconds: 300
+      key: [data.TargetUserName, origin]
+    severity_when:
+      # Remote attempts are worse than someone mistyping at the keyboard.
+      - severity: CRITICAL
+        conditions:
+          - field: is_remote_logon
+            equals: true
+    exclude:
+      - field: is_noise_account
+        equals: true
+    message: '{match_count} failed logons for "{data.TargetUserName}" from {origin} ({logon_type_name})'
+    dedup: [data.TargetUserName, origin]
+    entities:
+      account: data.TargetUserName
+      source: origin
+      ip: source_ip
+      logon_type: data.LogonType
+
+  - id: WIN-AUTH-PASSWORD-SPRAY
+    title: Password Spray
+    source: winevt
+    severity: CRITICAL
+    technique: T1110.003
+    match:
+      channel: Security
+      event_id: 4625
+    # Few failures each across MANY accounts from one source. A per-account
+    # threshold cannot see this: the attacker stays under it on purpose.
+    correlate:
+      type: distinct
+      distinct_field: data.TargetUserName
+      count: 5
+      window_seconds: 300
+      key: [origin]
+    exclude:
+      - field: is_noise_account
+        equals: true
+    message: '{distinct_count} distinct accounts targeted from {origin} - consistent with password spraying'
+    dedup: [origin]
+    entities:
+      source: origin
+      ip: source_ip
+      account_count: distinct_count
+
+  - id: WIN-AUTH-RDP-LOGON
+    title: Remote Desktop Logon
+    source: winevt
+    severity: MEDIUM
+    technique: T1021.001
+    match:
+      channel: Security
+      event_id: 4624
+    conditions:
+      - field: data.LogonType
+        equals: 10
+    severity_when:
+      - severity: HIGH
+        conditions:
+          - field: is_off_hours
+            equals: true
+    exclude:
+      - field: is_noise_account
+        equals: true
+    message: 'RDP logon by "{data.TargetUserName}" from {origin}'
+    dedup: [data.TargetUserName, origin]
+    entities:
+      account: data.TargetUserName
+      ip: source_ip
+      logon_type: data.LogonType
+
+  - id: WIN-AUTH-OFF-HOURS-LOGON
+    title: Off-Hours Logon
+    source: winevt
+    severity: MEDIUM
+    technique: T1078
+    match:
+      channel: Security
+      event_id: 4624
+    conditions:
+      - field: is_off_hours
+        equals: true
+      - field: is_remote_logon
+        equals: true
+      # RDP has its own rule above; don't double-report.
+      - field: data.LogonType
+        not_equals: 10
+    exclude:
+      - field: is_noise_account
+        equals: true
+    message: 'Off-hours {logon_type_name} logon by "{data.TargetUserName}" from {origin}'
+    dedup: [data.TargetUserName, origin]
+    entities:
+      account: data.TargetUserName
+      ip: source_ip
+      logon_type: data.LogonType
+
+  - id: WIN-AUTH-OFF-HOURS-ADMIN
+    title: Off-Hours Admin Session
+    source: winevt
+    severity: HIGH
+    technique: T1078.003
+    match:
+      channel: Security
+      event_id: 4672
+    conditions:
+      - field: is_off_hours
+        equals: true
+    exclude:
+      - field: is_noise_account
+        equals: true
+    message: 'Administrative privileges assigned to "{data.SubjectUserName}" outside business hours'
+    dedup: [data.SubjectUserName]
+    entities:
+      account: data.SubjectUserName
+
+  - id: WIN-AUTH-EXPLICIT-CREDS
+    title: Explicit Credential Use
+    source: winevt
+    severity: MEDIUM
+    technique: T1078
+    # 4648: a process authenticated using credentials other than the logged-on
+    # user's. Routine for admin tooling, but also how harvested credentials get
+    # used for lateral movement.
+    match:
+      channel: Security
+      event_id: 4648
+    conditions:
+      - field: data.TargetUserName
+        exists: true
+    exclude:
+      - field: is_noise_account
+        equals: true
+      - field: data.TargetServerName
+        glob_any: ['localhost', '-']
+    message: '"{data.SubjectUserName}" used explicit credentials for "{data.TargetUserName}" on {data.TargetServerName}'
+    dedup: [data.SubjectUserName, data.TargetUserName]
+    entities:
+      actor: data.SubjectUserName
+      target_account: data.TargetUserName
+      target_server: data.TargetServerName
+
+  - id: WIN-ACCOUNT-CREATED
+    title: User Account Created
+    source: winevt
+    severity: HIGH
+    technique: T1136.001
+    match:
+      channel: Security
+      event_id: 4720
+    message: 'Account "{data.TargetUserName}" created by "{data.SubjectUserName}"'
+    dedup: [data.TargetUserName]
+    entities:
+      account: data.TargetUserName
+      created_by: data.SubjectUserName
+
+  - id: WIN-ACCOUNT-DELETED
+    title: User Account Deleted
+    source: winevt
+    severity: MEDIUM
+    technique: T1531
+    match:
+      channel: Security
+      event_id: 4726
+    message: 'Account "{data.TargetUserName}" deleted by "{data.SubjectUserName}"'
+    dedup: [data.TargetUserName]
+    entities:
+      account: data.TargetUserName
+      deleted_by: data.SubjectUserName
+
+  - id: WIN-ACCOUNT-ENABLED
+    title: Disabled Account Re-Enabled
+    source: winevt
+    severity: HIGH
+    technique: T1098
+    # 4722: a dormant/disabled account being switched back on is a classic way
+    # to regain access without creating anything new to notice.
+    match:
+      channel: Security
+      event_id: 4722
+    message: 'Account "{data.TargetUserName}" was enabled by "{data.SubjectUserName}"'
+    dedup: [data.TargetUserName]
+    entities:
+      account: data.TargetUserName
+      enabled_by: data.SubjectUserName
+
+  - id: WIN-PASSWORD-RESET-BY-OTHER
+    title: Account Password Reset By Another User
+    source: winevt
+    severity: HIGH
+    technique: T1098
+    # 4724: an administrative password reset. Legitimate at a help desk, and
+    # also how an attacker takes over an existing account.
+    match:
+      channel: Security
+      event_id: 4724
+    message: 'Password for "{data.TargetUserName}" was reset by "{data.SubjectUserName}"'
+    dedup: [data.TargetUserName, data.SubjectUserName]
+    entities:
+      account: data.TargetUserName
+      reset_by: data.SubjectUserName
+
+  - id: WIN-PRIVILEGED-GROUP-CHANGE
+    title: Privileged Group Membership Change
+    source: winevt
+    severity: MEDIUM
+    technique: T1098
+    match:
+      channel: Security
+      event_id: [4732, 4728, 4756]
+    severity_when:
+      - severity: CRITICAL
+        conditions:
+          - field: data.TargetUserName
+            in:
+              - Administrators
+              - Domain Admins
+              - Enterprise Admins
+              - Schema Admins
+              - Backup Operators
+              - Remote Desktop Users
+              - Account Operators
+    message: '"{member}" added to group "{data.TargetUserName}" by "{data.SubjectUserName}"'
+    dedup: [data.TargetUserName, member]
+    entities:
+      group: data.TargetUserName
+      member: member
+      changed_by: data.SubjectUserName
+
+  - id: WIN-AUDIT-LOG-CLEARED
+    title: Audit Log Cleared
+    source: winevt
+    severity: CRITICAL
+    technique: T1070.001
+    # Almost never legitimate. A hallmark of an intruder covering their tracks,
+    # so this has no severity conditions and no exclusions by design.
+    match:
+      channel: Security
+      event_id: 1102
+    message: 'Security audit log was cleared by "{data.SubjectUserName}" - possible anti-forensics'
+    dedup: [audit-cleared]
+    entities:
+      account: data.SubjectUserName
+
+  - id: WIN-AUDIT-POLICY-CHANGED
+    title: Audit Policy Changed
+    source: winevt
+    severity: HIGH
+    technique: T1562.002
+    # 4719: turning off auditing is quieter than clearing the log afterwards.
+    match:
+      channel: Security
+      event_id: 4719
+    message: 'System audit policy was changed by "{data.SubjectUserName}"'
+    dedup: [data.SubjectUserName]
+    entities:
+      account: data.SubjectUserName
+      category: data.CategoryId
+
+  - id: WIN-SCHEDULED-TASK-CREATED
+    title: Scheduled Task Created
+    source: winevt
+    severity: MEDIUM
+    technique: T1053.005
+    match:
+      channel: Security
+      event_id: 4698
+    severity_when:
+      # A task whose action is a script host or an encoded command is a
+      # persistence implant, not a maintenance job.
+      - severity: CRITICAL
+        conditions:
+          - field: data.TaskContent
+            contains_any:
+              - powershell
+              - -enc
+              - cmd.exe
+              - mshta
+              - rundll32
+              - regsvr32
+              - wscript
+              - cscript
+              - bitsadmin
+              - certutil
+    message: 'Scheduled task "{data.TaskName}" created by "{data.SubjectUserName}"'
+    dedup: [data.TaskName]
+    entities:
+      task: data.TaskName
+      created_by: data.SubjectUserName
+
+  - id: WIN-LOG-CLEARED-BURST
+    title: Repeated Log Clearing
+    source: winevt
+    severity: CRITICAL
+    technique: T1070.001
+    # Clearing several logs in quick succession is a deliberate cleanup sweep
+    # rather than an administrator tidying one log.
+    match:
+      channel: Security
+      event_id: 1102
+    correlate:
+      type: threshold
+      count: 2
+      window_seconds: 600
+      key: [data.SubjectUserName]
+    message: '{match_count} audit logs cleared by "{data.SubjectUserName}" within 10 minutes - active anti-forensics'
+    dedup: [burst, data.SubjectUserName]
+    entities:
+      account: data.SubjectUserName

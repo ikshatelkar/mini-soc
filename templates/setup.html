@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini SOC - Create admin account</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <main class="auth-page">
+        <div class="card auth-card">
+            <h1 class="auth-title">Welcome to Mini SOC</h1>
+            <p class="auth-subtitle">
+                This runs once. Create the one admin account that will be able to
+                view alerts and manage this dashboard - no one else will have access.
+            </p>
+
+            {% if error %}
+            <div class="auth-error">{{ error }}</div>
+            {% endif %}
+
+            <form method="post" class="auth-form">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" autocomplete="new-password" required minlength="8">
+
+                <label for="confirm">Confirm password</label>
+                <input type="password" id="confirm" name="confirm" autocomplete="new-password" required minlength="8">
+
+                <button type="submit" class="icon-btn primary auth-submit">Create admin account</button>
+            </form>
+        </div>
+    </main>
+</body>
+</html>

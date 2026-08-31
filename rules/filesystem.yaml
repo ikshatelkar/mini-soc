@@ -1,0 +1,94 @@
+# File integrity detections.
+#
+# Field reference:
+#   data.path        full path of the affected file
+#   data.filename    basename
+#   data.directory   watched directory the file belongs to
+#   change_type      'created' | 'modified' | 'deleted'
+#   is_sensitive     true when the filename matches config.FIM_SENSITIVE_PATTERNS
+#
+# Severities here assume the watched directories hold files that are NOT
+# supposed to change. Pointed at a directory with legitimate churn these rules
+# produce noise, which is a scope problem rather than a rule problem - see the
+# comments in config.py.
+
+rules:
+
+  - id: FIM-FILE-MODIFIED
+    title: File Modified
+    source: fim
+    severity: HIGH
+    technique: T1565.001
+    match:
+      change_type: modified
+    severity_when:
+      - severity: CRITICAL
+        conditions:
+          - field: is_sensitive
+            equals: true
+    message: 'File modified: {data.path}'
+    dedup: [data.path]
+    entities:
+      file: data.path
+      directory: data.directory
+
+  - id: FIM-FILE-CREATED
+    title: File Created
+    source: fim
+    severity: LOW
+    technique: T1565.001
+    match:
+      change_type: created
+    severity_when:
+      # A new executable or script appearing where nothing should change is a
+      # dropped payload, not a new document.
+      - severity: HIGH
+        conditions:
+          - field: data.filename
+            glob_any: ['*.exe', '*.dll', '*.ps1', '*.bat', '*.cmd', '*.vbs',
+                       '*.js', '*.scr', '*.hta', '*.jar']
+    message: 'New file created: {data.path}'
+    dedup: [data.path]
+    entities:
+      file: data.path
+      directory: data.directory
+
+  - id: FIM-FILE-DELETED
+    title: File Deleted
+    source: fim
+    severity: MEDIUM
+    technique: T1070.004
+    match:
+      change_type: deleted
+    severity_when:
+      - severity: HIGH
+        conditions:
+          - field: is_sensitive
+            equals: true
+    message: 'File deleted: {data.path}'
+    dedup: [data.path]
+    entities:
+      file: data.path
+      directory: data.directory
+
+  - id: FIM-MASS-MODIFICATION
+    title: Mass File Modification
+    source: fim
+    severity: CRITICAL
+    technique: T1486
+    # Many files changing in one directory in a short window is the signature of
+    # ransomware encrypting in place. Keyed on the directory rather than the file
+    # so the count accumulates across different files.
+    match:
+      change_type: modified
+    correlate:
+      type: distinct
+      distinct_field: data.path
+      count: 10
+      window_seconds: 120
+      key: [data.directory]
+    message: '{distinct_count} files modified in "{data.directory}" within 2 minutes - possible ransomware encryption'
+    dedup: [mass-modify, data.directory]
+    entities:
+      directory: data.directory
+      file_count: distinct_count

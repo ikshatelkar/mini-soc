@@ -1,79 +1,141 @@
+"""Authentication log parser.
+
+Parses an OpenSSH/syslog-style auth log into normalized events and hands them to
+the rule engine. This module no longer decides what is suspicious - thresholds,
+severities and exclusions all live in rules/authlog.yaml. What stays here is
+parsing, plus the small amount of state a rule cannot compute from a single line:
+how many times an IP failed recently, which is what turns "a login succeeded"
+into "a brute force worked."
+"""
+
 import os
-import time
 import re
-import threading
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
-from core.db import log_alert  # type: ignore
 
-from config import LOG_FILE_PATH  # type: ignore
-LOG_FILE = LOG_FILE_PATH
+import config  # type: ignore
+from core.detect import process_authlog  # type: ignore
+from core.pipeline import pipeline  # type: ignore
 
-# Dictionary to track failed attempts: { 'ip': [timestamp1, timestamp2, ...] }
-failed_attempts = {}
+MODULE = 'LOG_MONITOR'
 
-def parse_log_line(line):
-    """Parse a single auth.log line for brute force or unusual access."""
-    # Regex for capturing Timestamp, Status, User, IP
-    # Matches formats like: "Mar 18 15:17:00 server sshd[1234]: Failed password for admin from 198.51.100.99 port 50000 ssh2"
-    match = re.search(r'([A-Za-z]{3}\s+\d+\s+\d{2}:\d{2}:\d{2}).*(Failed|Accepted)\s+password\s+for\s+(\S+)\s+from\s+([0-9\.]+)', line)
-    
+# How far back a failure still counts as "recent" when a login succeeds.
+RECENT_FAILURE_WINDOW = timedelta(minutes=10)
+
+_recent_failures: dict[str, deque] = defaultdict(deque)
+_last_prune = datetime.now()
+
+AUTH_PATTERN = re.compile(
+    r'([A-Za-z]{3}\s+\d+\s+\d{2}:\d{2}:\d{2})'      # syslog timestamp
+    r'.*?(Failed|Accepted)\s+password\s+for\s+'
+    r'(?:invalid\s+user\s+)?(\S+)\s+from\s+'
+    r'([0-9a-fA-F:.]+)'                              # IPv4 or IPv6
+)
+
+
+def _prune(now: datetime) -> None:
+    """Bound the failure-tracking state.
+
+    Without this the dictionary grows for every IP ever seen - invisible on a
+    workstation, an unbounded leak in a service running for months against an
+    internet-facing log.
+    """
+    global _last_prune
+    if now - _last_prune < timedelta(minutes=5):
+        return
+    _last_prune = now
+    cutoff = now - RECENT_FAILURE_WINDOW
+    for ip in list(_recent_failures):
+        bucket = _recent_failures[ip]
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if not bucket:
+            del _recent_failures[ip]
+
+
+def _count_recent_failures(ip: str, now: datetime) -> int:
+    bucket = _recent_failures[ip]
+    cutoff = now - RECENT_FAILURE_WINDOW
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    return len(bucket)
+
+
+def parse_log_line(line: str) -> None:
+    """Parse one log line into a normalized event for the rule engine."""
+    match = AUTH_PATTERN.search(line)
     if not match:
         return
-        
-    log_time_str = match.group(1)
-    status = match.group(2)
-    user = match.group(3)
-    ip = match.group(4)
-    
-    # Assuming the log is for the current year
-    current_year = datetime.now().year
+
+    log_time_str, status, user, ip = match.groups()
+    now = datetime.now()
+    _prune(now)
+
+    # Syslog timestamps carry no year, so assume the current one. Only the hour
+    # is used for detection, so a year boundary is harmless.
     try:
-        log_time = datetime.strptime(f"{current_year} {log_time_str}", "%Y %b %d %H:%M:%S")
+        log_time = datetime.strptime(f'{now.year} {log_time_str}', '%Y %b %d %H:%M:%S')
     except ValueError:
         return
-        
-    now = datetime.now()
-    
+
     if status == 'Failed':
-        if ip not in failed_attempts:
-            failed_attempts[ip] = []
-        failed_attempts[ip].append(now)
-        
-        # Keep only attempts within the last 5 minutes
-        failed_attempts[ip] = [dt for dt in failed_attempts[ip] if now - dt <= timedelta(minutes=5)]
-        
-        # Detect Brute Force (>5 attempts in 5 minutes)
-        if len(failed_attempts[ip]) >= 5:
-            description = f"Brute force detected from {ip} targeting {user} ({len(failed_attempts[ip])} fails)"
-            log_alert('LOG_MONITOR', 'Brute Force Attack', 'CRITICAL', description, source_ip=ip)
-            # Clear IP to prevent duplicate alerts for the same burst
-            failed_attempts[ip] = []
-            
-    elif status == 'Accepted':
-        # Detect Unusual Access Hours (Outside 6 AM to 10 PM)
-        hour = log_time.hour
-        if hour < 6 or hour >= 22:
-            description = f"Unusual access time ({hour:02d}:00) by {user} from {ip}"
-            log_alert('LOG_MONITOR', 'Unusual Access', 'MEDIUM', description, source_ip=ip)
+        _recent_failures[ip].append(now)
+        recent = _count_recent_failures(ip, now)
+    else:
+        # Count failures *before* this success, so the number describes what led
+        # up to it. Then clear them: the account is in, and leaving the failures
+        # would re-flag every subsequent login from this IP.
+        recent = _count_recent_failures(ip, now)
+        _recent_failures.pop(ip, None)
 
-def start_log_monitor():
-    """Tails the log file continuously and parses new entries."""
-    if not os.path.exists(LOG_FILE):
-        # Create an empty template file if it's missing to avoid crashing
-        open(LOG_FILE, 'a').close()
-        
-    print(f"[*] Starting Log Monitor -> {LOG_FILE}")
-    with open(LOG_FILE, 'r') as f:
-        # Move pointer to the end of the file when starting
-        f.seek(0, os.SEEK_END)
+    process_authlog(status=status, user=user, ip=ip, hour=log_time.hour,
+                    recent_failures=recent, line=line)
+
+
+def start_log_monitor(log_file: str | None = None) -> None:
+    """Tail the configured log file, following it across rotation.
+
+    Log files get rotated out from under a tail. Detecting truncation and
+    reopening is what keeps the monitor working past the first rotation instead
+    of silently reading nothing forever.
+    """
+    log_file = log_file or config.LOG_FILE_PATH
+
+    while not os.path.exists(log_file):
+        print(f'[*] Log monitor waiting for {log_file} to appear...')
+        pipeline.heartbeat(MODULE)
+        time.sleep(5)
+
+    print(f'[*] Starting Log Monitor -> {log_file}')
+    handle = open(log_file, 'r', errors='replace')
+    handle.seek(0, os.SEEK_END)
+
+    try:
         while True:
-            line = f.readline()
-            if not line:
-                time.sleep(0.5)
+            line = handle.readline()
+            if line:
+                pipeline.heartbeat(MODULE)
+                try:
+                    parse_log_line(line.strip())
+                except Exception as exc:
+                    print(f'[!] Failed to parse log line: {exc}')
                 continue
-            parse_log_line(line.strip())
 
-def run_log_monitor_background():
-    """Starts the log tailer in a background daemon thread."""
-    t = threading.Thread(target=start_log_monitor, daemon=True)
-    t.start()
+            pipeline.heartbeat(MODULE)
+            time.sleep(0.5)
+
+            try:
+                if os.stat(log_file).st_size < handle.tell():
+                    print('[*] Log file truncated or rotated - reopening')
+                    handle.close()
+                    handle = open(log_file, 'r', errors='replace')
+            except FileNotFoundError:
+                print('[*] Log file disappeared - waiting for it to return')
+                handle.close()
+                while not os.path.exists(log_file):
+                    pipeline.heartbeat(MODULE)
+                    time.sleep(5)
+                handle = open(log_file, 'r', errors='replace')
+    finally:
+        handle.close()

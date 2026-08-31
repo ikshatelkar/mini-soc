@@ -1,0 +1,60 @@
+# Global allowlist - known-good activity that should never raise an alert.
+#
+# WHY THIS FILE EXISTS
+#
+# Every real deployment eventually has legitimate activity that trips a good
+# rule: a vulnerability scanner that fails logons all day, a backup job that runs
+# at 3am, a monitoring agent that opens an odd port. The tempting fix is to
+# disable the rule - but that throws away real coverage, and the usual next step
+# after that is muting the tool entirely. An exception mutes the one thing
+# instead, so the rule keeps protecting you against everything else.
+#
+# HOW ENTRIES WORK
+#
+#   conditions:  ALL must match for the exception to apply (AND).
+#   rules:       optional list of rule IDs this applies to; supports globs.
+#                Omit it and the exception applies to every rule - powerful, so
+#                prefer scoping it.
+#   comment:     why this exists. Not optional in practice: an unexplained
+#                exception is impossible for the next person to safely remove.
+#
+# Exceptions are evaluated BEFORE correlation, so an excluded event does not
+# count toward a threshold. Hit counts are reported on /api/rules, which is how
+# you spot an exception that has become too broad or is no longer needed.
+#
+# The entries below are commented-out examples. Uncomment and adapt them; they
+# are deliberately inert so a fresh install starts with no blind spots.
+
+exceptions:
+
+  # A vulnerability scanner authenticating against everything is expected to
+  # fail constantly. Scope it to the auth rules so the scanner host is still
+  # covered by every other detection.
+  # - comment: "Nessus scanner at 10.0.0.50 - authenticated scans fail logons by design"
+  #   rules: [WIN-AUTH-BRUTE-FORCE, WIN-AUTH-PASSWORD-SPRAY, AUTH-BRUTE-FORCE]
+  #   conditions:
+  #     - field: source_ip
+  #       equals: 10.0.0.50
+
+  # A backup service account legitimately works outside business hours. Only the
+  # off-hours rules are muted; a brute force against this same account still fires.
+  # - comment: "svc_backup runs nightly at 02:00 by design (ticket OPS-1421)"
+  #   rules: ['*OFF-HOURS*']
+  #   conditions:
+  #     - field: data.TargetUserName
+  #       equals: svc_backup
+
+  # A monitoring agent that listens on a port on the suspicious list.
+  # - comment: "Prometheus node_exporter binds 9100; 8080 is our internal metrics proxy"
+  #   rules: [NET-SUSPICIOUS-LISTENER]
+  #   conditions:
+  #     - field: data.process
+  #       glob_any: ['node_exporter*', 'prometheus*']
+
+  # An application that rewrites its own config file on every start, inside an
+  # otherwise-static watched directory.
+  # - comment: "app.exe rewrites cache.json on startup - not integrity-relevant"
+  #   rules: [FIM-FILE-MODIFIED, FIM-MASS-MODIFICATION]
+  #   conditions:
+  #     - field: data.filename
+  #       equals: cache.json

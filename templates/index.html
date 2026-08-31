@@ -3,49 +3,69 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mini SOC Monitoring System</title>
+    <title>Mini SOC</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-    <!-- Plotly CDN for Charts & World Map -->
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <header class="soc-header">
         <div class="header-title">
-            <span class="pulse-dot"></span>
-            <h1>Mini SOC Dashboard</h1>
+            <h1>Mini SOC</h1>
+            <span class="status-pill good" id="header-status-pill">
+                <span class="pulse-dot"></span>
+                <span id="header-status-text">Checking...</span>
+            </span>
         </div>
         <div class="header-actions">
-            <button onclick="window.location.href='/api/export'" class="btn-export">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+            <span class="pipeline-indicator advanced-only" id="pipeline-indicator" title="Alert processing queue depth"></span>
+            <div class="mode-toggle" id="mode-toggle" role="group" aria-label="Detail level">
+                <button data-mode="simple" class="active" type="button">Simple</button>
+                <button data-mode="advanced" type="button">Advanced</button>
+            </div>
+            <button class="icon-btn" id="theme-toggle" type="button" title="Toggle light/dark">🌓 Theme</button>
+            <button class="icon-btn primary" onclick="window.location.href='/api/export'" type="button">
                 Export CSV
             </button>
+            <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
+                <button class="icon-btn" type="submit" title="Sign out">Logout</button>
+            </form>
         </div>
     </header>
 
     <main class="soc-container">
-        <!-- Top Stats Cards -->
+
+        <!-- Needs Attention: the one thing this page must answer immediately -->
+        <section class="card" id="attention-card">
+            <div class="section-header">
+                <h2>Needs Your Attention</h2>
+                <span class="section-subtitle" id="attention-subtitle"></span>
+            </div>
+            <div id="attention-body">
+                <div class="empty-note">Loading...</div>
+            </div>
+        </section>
+
+        <!-- Overview -->
         <div class="stats-row">
+            <div class="stat-card" id="tile-needs-attention">
+                <h3>Needs Attention</h3>
+                <p class="stat-value" id="stat-needs-attention">0</p>
+            </div>
             <div class="stat-card">
-                <h3>Total Alerts Delivered</h3>
-                <h2 id="total-alerts-count">0</h2>
+                <h3>Handled</h3>
+                <p class="stat-value" id="stat-handled">0</p>
             </div>
-            <div class="stat-card critical">
-                <h3>High/Critical Threats</h3>
-                <h2 id="critical-alerts-count">0</h2>
+            <div class="stat-card">
+                <h3>Total Events Seen</h3>
+                <p class="stat-value" id="stat-total-events">0</p>
             </div>
-            <div class="stat-card FIM">
-                <h3>Integrity Violations</h3>
-                <h2 id="fim-alerts-count">0</h2>
-            </div>
-            <div class="stat-card geo">
-                <h3>Unique Attack Origins</h3>
-                <h2 id="geo-origins-count">0</h2>
+            <div class="stat-card">
+                <h3>Attack Origins Mapped</h3>
+                <p class="stat-value" id="stat-origins">0</p>
             </div>
         </div>
 
-        <!-- Charts Row -->
+        <!-- Charts -->
         <div class="charts-row">
             <div class="chart-container" id="alerts-by-type-pie-container">
                 <div id="alerts-by-type-pie"></div>
@@ -55,37 +75,71 @@
             </div>
         </div>
 
-        <!-- World Map Section -->
-        <div class="map-section">
-            <div class="table-header">
-                <h2>🌍 Attacker Origin World Map</h2>
-                <div class="live-indicator" id="map-status">Waiting for geo data...</div>
+        <!-- World map -->
+        <section class="card">
+            <div class="section-header">
+                <h2>🌍 Where Activity Is Coming From</h2>
+                <span class="section-subtitle" id="map-status">Waiting for data...</span>
             </div>
             <div id="attack-world-map"></div>
-        </div>
+        </section>
 
-        <!-- Alerts Table Section -->
-        <div class="alerts-table-section">
-            <div class="table-header">
-                <h2>Real-Time Anomaly Log</h2>
-                <div class="live-indicator">Tracking Live Activity...</div>
+        <!-- Full alert log -->
+        <section class="card">
+            <div class="section-header">
+                <h2>Activity Log</h2>
+                <div class="table-tabs" id="log-tabs" role="tablist">
+                    <button data-status="open" class="active" type="button">Open</button>
+                    <button data-status="" type="button">All</button>
+                    <button data-status="acknowledged" type="button">Handled</button>
+                    <button data-status="dismissed" type="button">Dismissed</button>
+                </div>
             </div>
-            <table class="soc-table">
-                <thead>
-                    <tr>
-                        <th>Timestamp (Local)</th>
-                        <th>Module</th>
-                        <th>Severity</th>
-                        <th>Detection Synopsis</th>
-                        <th>Origin</th>
-                        <th>ISP / Provider</th>
-                    </tr>
-                </thead>
-                <tbody id="alerts-table-body">
-                    <!-- Javascript populates table rows -->
-                </tbody>
-            </table>
-        </div>
+            <div class="soc-table-wrap">
+                <table class="soc-table">
+                    <thead>
+                        <tr>
+                            <th>When</th>
+                            <th class="advanced-only">Source</th>
+                            <th>Severity</th>
+                            <th>What Happened</th>
+                            <th class="advanced-only">ATT&amp;CK</th>
+                            <th>Status</th>
+                            <th>Origin</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="alerts-table-body">
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- System status: operational/technical detail, tucked away by default -->
+        <section class="card">
+            <details class="scope-details">
+                <summary>System Status &amp; Monitoring Scope</summary>
+                <div id="scope-body" class="scope-body">Loading...</div>
+                <div id="telemetry-body" class="scope-body" style="margin-top: 0.5rem;"></div>
+                <div id="detection-summary" class="section-subtitle" style="margin-top: 0.75rem;"></div>
+                <div id="rule-errors" class="rule-errors"></div>
+            </details>
+        </section>
+
+        <!-- Phase 5: workers forwarding events to this server. Admin-only by
+             virtue of the whole dashboard being login-gated - see core/auth.py. -->
+        <section class="card">
+            <details class="scope-details">
+                <summary>Enrolled Workers</summary>
+                <div id="agents-body" class="scope-body">Loading...</div>
+                <form id="agent-add-form" class="agent-add-form">
+                    <input type="text" id="agent-name-input" placeholder="Worker name (e.g. FRONT-DESK-PC)" required>
+                    <button class="icon-btn primary" type="submit">Enroll worker</button>
+                </form>
+                <div id="agent-token-reveal" class="agent-token-reveal" hidden></div>
+            </details>
+        </section>
+
     </main>
 
     <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>

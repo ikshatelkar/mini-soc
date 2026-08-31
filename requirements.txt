@@ -1,4 +1,21 @@
 Flask==3.0.0
 Werkzeug==3.0.1
-pandas==2.1.3
 plotly==5.18.0
+plyer==2.1.0
+
+# Enumerates listening sockets and established connections in core/network_monitor.py.
+psutil>=5.9.0
+
+# Parses the YAML rule files under rules/ (core/ruleloader.py).
+PyYAML>=6.0
+
+# Production-grade WSGI server for the dashboard - replaces Flask's built-in
+# dev server, which prints its own warning against unattended use. Pure
+# Python, free, the standard choice on Windows (gunicorn needs fork(), which
+# Windows doesn't have). Used by both `python app.py` and service.py.
+waitress>=2.1.2
+
+# Windows-only: powers the desktop sound + toast in core/notify.py and notifier.py.
+# pywin32 is required by plyer's Windows notification backend, and separately
+# provides the Windows Service framework used by service.py.
+pywin32>=306; sys_platform == "win32"

@@ -8,8 +8,12 @@ build/
 dist/
 *.spec
 
-# SQLite database (contains your personal alert history)
+# SQLite database (contains your personal alert history). The -wal/-shm
+# sidecars hold recently written rows that haven't been checkpointed into the
+# .db yet, so they carry the same data and must be excluded too.
 *.db
+*.db-wal
+*.db-shm
 
 # Log files (may contain sensitive server data)
 logs/dummy_auth.log
@@ -24,3 +28,16 @@ desktop.ini
 
 # Export files
 alerts_export.csv
+
+# Local secrets (email credentials) - never commit this file.
+# Copy config_local.example.py to config_local.py and fill it in instead.
+config_local.py
+
+# Service/notifier runtime files
+service.log
+notifier_state.json
+
+# Agent forwarding buffer (per-machine runtime state, may contain event data)
+agent_buffer.jsonl
+agent_buffer.jsonl.compact
+agent_buffer_state.json

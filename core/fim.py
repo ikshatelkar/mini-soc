@@ -1,72 +1,147 @@
+"""File Integrity Monitor.
+
+Watches a small set of directories for files being created, modified or deleted,
+by comparing SHA-256 hashes against a stored baseline.
+
+Scope discipline matters more here than anywhere else in the tool. Integrity
+monitoring only carries signal for files that are *supposed* to never change - a
+hosts file, a deployed web root, a config directory. Pointed at somewhere with
+legitimate churn it produces pure noise, because "this file changed" means
+nothing when the answer is always "yes, I changed it." Watched paths and ignore
+patterns are both configurable, and the dashboard reports the effective scope so
+what is under watch is visible without reading this file.
+"""
+
+import fnmatch
 import os
 import time
 import hashlib
-from core.db import get_connection, log_alert  # type: ignore
 
-from config import FIM_DIRECTORY  # type: ignore
-TEST_DIR = FIM_DIRECTORY
+import config  # type: ignore
+from core import db  # type: ignore
+from core.detect import process_fim  # type: ignore
+from core.pipeline import pipeline  # type: ignore
 
-def get_file_hash(filepath):
-    """Calculate SHA-256 hash of a file."""
+MODULE = 'FIM'
+
+
+def _watched_directories() -> list[str]:
+    dirs = getattr(config, 'FIM_DIRECTORIES', None)
+    if dirs:
+        return list(dirs)
+    # Tolerate the older single-directory setting so an existing config keeps working.
+    legacy = getattr(config, 'FIM_DIRECTORY', None)
+    return [legacy] if legacy else []
+
+
+def _is_ignored(filename: str) -> bool:
+    return any(fnmatch.fnmatch(filename, pattern)
+               for pattern in getattr(config, 'FIM_IGNORE_PATTERNS', []))
+
+
+def get_file_hash(filepath: str) -> str | None:
+    """SHA-256 of a file, or None if it cannot be read.
+
+    Returning None for unreadable files is deliberate: a file deleted or locked
+    mid-scan is normal, not an integrity event, and must not raise an alert.
+    """
     sha256 = hashlib.sha256()
     try:
         with open(filepath, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b""):
+            for chunk in iter(lambda: f.read(65536), b''):
                 sha256.update(chunk)
         return sha256.hexdigest()
-    except Exception:
-        # File might be deleted mid-scan, or permission denied
+    except (OSError, PermissionError):
         return None
 
-def scan_directory():
-    """Scan the TEST_DIR and compare against baselines stored in SQLite."""
-    os.makedirs(TEST_DIR, exist_ok=True)
-    
-    conn = get_connection()
+
+def _snapshot(directory: str) -> dict[str, str]:
+    """Current hashes for every non-ignored file under a directory."""
+    snapshot = {}
+    for root, _dirs, files in os.walk(directory):
+        for filename in files:
+            if _is_ignored(filename):
+                continue
+            path = os.path.join(root, filename)
+            file_hash = get_file_hash(path)
+            if file_hash:
+                snapshot[path] = file_hash
+    return snapshot
+
+
+def scan_directory(conn, directory: str) -> None:
+    """Compare a directory against its stored baseline and alert on differences."""
+    if not os.path.isdir(directory):
+        return
+
     c = conn.cursor()
-    
-    # Get current baselines
-    c.execute("SELECT file_path, file_hash FROM fim_baselines")
+    prefix = os.path.join(directory, '')
+    c.execute('SELECT file_path, file_hash FROM fim_baselines WHERE file_path LIKE ?',
+              (prefix + '%',))
     baselines = {row['file_path']: row['file_hash'] for row in c.fetchall()}
-    
-    # Get current files on disk
-    current_files = {}
-    for root, _, files in os.walk(TEST_DIR):
-        for file in files:
-            filepath = os.path.join(root, file)
-            filehash = get_file_hash(filepath)
-            if filehash:
-                current_files[filepath] = filehash
-            
-    # Check for modifications & additions
-    for filepath, filehash in current_files.items():
-        if filepath not in baselines:
-            # New File
-            log_alert('FIM', 'File Created', 'LOW', f"New file added: {os.path.basename(filepath)}")
-            c.execute("INSERT INTO fim_baselines (file_path, file_hash) VALUES (?, ?)", (filepath, filehash))
-        elif baselines[filepath] != filehash:
-            # Modified File
-            log_alert('FIM', 'File Modified', 'HIGH', f"File modified: {os.path.basename(filepath)}")
-            c.execute("UPDATE fim_baselines SET file_hash = ?, last_updated = CURRENT_TIMESTAMP WHERE file_path = ?", (filehash, filepath))
-            
-    # Check for deletions
-    for filepath in baselines.keys():
-        if filepath not in current_files:
-            log_alert('FIM', 'File Deleted', 'MEDIUM', f"File deleted: {os.path.basename(filepath)}")
-            c.execute("DELETE FROM fim_baselines WHERE file_path = ?", (filepath,))
-            
+
+    current = _snapshot(directory)
+
+    # First sight of a directory establishes the baseline silently. Without this,
+    # installing the tool would alert once per pre-existing file - hundreds of
+    # meaningless "file created" alerts that teach an operator to ignore the tool.
+    if not baselines:
+        for path, file_hash in current.items():
+            c.execute('INSERT OR REPLACE INTO fim_baselines (file_path, file_hash) VALUES (?, ?)',
+                      (path, file_hash))
+        conn.commit()
+        print(f'[*] FIM baseline established for {directory} ({len(current)} files)')
+        return
+
+    for path, file_hash in current.items():
+        if path not in baselines:
+            process_fim('created', path, directory)
+            c.execute('INSERT OR REPLACE INTO fim_baselines (file_path, file_hash) VALUES (?, ?)',
+                      (path, file_hash))
+        elif baselines[path] != file_hash:
+            process_fim('modified', path, directory)
+            c.execute('UPDATE fim_baselines SET file_hash = ?, '
+                      'last_updated = CURRENT_TIMESTAMP WHERE file_path = ?',
+                      (file_hash, path))
+
+    for path in baselines:
+        if path not in current:
+            process_fim('deleted', path, directory)
+            c.execute('DELETE FROM fim_baselines WHERE file_path = ?', (path,))
+
     conn.commit()
-    conn.close()
 
-def start_fim_monitor(interval=10):
-    """Run the directory scan periodically."""
-    print(f"[*] Starting File Integrity Monitor -> {TEST_DIR}")
-    while True:
-        scan_directory()
-        time.sleep(interval)
 
-import threading
-def run_fim_monitor_background():
-    """Starts FIM monitor in a background thread."""
-    t = threading.Thread(target=start_fim_monitor, daemon=True)
-    t.start()
+def get_monitoring_scope() -> list[dict]:
+    """What the FIM is actually watching, for display on the dashboard."""
+    scope = []
+    for directory in _watched_directories():
+        exists = os.path.isdir(directory)
+        scope.append({
+            'path': directory,
+            'exists': exists,
+            'file_count': len(_snapshot(directory)) if exists else 0,
+        })
+    return scope
+
+
+def start_fim_monitor(interval: int | None = None) -> None:
+    interval = interval or config.FIM_SCAN_INTERVAL
+    directories = _watched_directories()
+    if not directories:
+        print('[!] FIM has no directories configured - module idle')
+        return
+
+    print(f'[*] Starting File Integrity Monitor -> {", ".join(directories)}')
+    conn = db.get_connection()
+    try:
+        while True:
+            pipeline.heartbeat(MODULE)
+            for directory in directories:
+                try:
+                    scan_directory(conn, directory)
+                except Exception as exc:
+                    print(f'[!] FIM scan of {directory} failed: {exc}')
+            time.sleep(interval)
+    finally:
+        conn.close()

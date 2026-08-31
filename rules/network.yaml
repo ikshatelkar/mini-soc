@@ -1,0 +1,65 @@
+# Network socket detections, driven by psutil enumeration of this host.
+#
+# Field reference:
+#   data.port            local port (listeners)
+#   data.remote_port     remote port (outbound connections)
+#   data.remote_ip       remote address (outbound connections)
+#   data.process         owning process name
+#   data.pid             owning process id
+#   data.bind_address    address a listener is bound to
+#   network_exposed      true when bound to 0.0.0.0 / :: rather than loopback
+#   port_description     why the port is on the suspicious list
+#   kind                 'listener' | 'egress' | 'closed'
+
+rules:
+
+  - id: NET-SUSPICIOUS-LISTENER
+    title: Suspicious Listener
+    source: network
+    severity: HIGH
+    technique: T1571
+    match:
+      kind: listener
+    severity_when:
+      # Bound to all interfaces means reachable from the network, not just a
+      # local development server bound to loopback.
+      - severity: CRITICAL
+        conditions:
+          - field: network_exposed
+            equals: true
+    message: 'Process "{data.process}" is listening on port {data.port} ({port_description}) on {data.bind_address}'
+    dedup: [listener, data.port, data.pid]
+    entities:
+      port: data.port
+      pid: data.pid
+      process: data.process
+      bind_address: data.bind_address
+      network_exposed: network_exposed
+
+  - id: NET-SUSPICIOUS-EGRESS
+    title: Suspicious Outbound Connection
+    source: network
+    severity: CRITICAL
+    technique: T1071
+    # Outbound matters more than inbound for modern implants: dialling out to a
+    # controller beats waiting for a connection through a NAT or firewall.
+    match:
+      kind: egress
+    message: 'Process "{data.process}" connected out to {data.remote_ip}:{data.remote_port} ({port_description})'
+    dedup: [egress, data.remote_ip, data.remote_port]
+    entities:
+      remote_ip: data.remote_ip
+      remote_port: data.remote_port
+      pid: data.pid
+      process: data.process
+
+  - id: NET-SOCKET-CLOSED
+    title: Suspicious Socket Closed
+    source: network
+    severity: INFO
+    match:
+      kind: closed
+    message: 'Previously flagged {data.kind_label} {data.descriptor} is no longer present'
+    dedup: [closed, data.descriptor]
+    entities:
+      descriptor: data.descriptor

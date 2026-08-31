@@ -1,0 +1,107 @@
+# SSH / syslog-style authentication log detections.
+#
+# Applies to the text log configured as LOG_FILE_PATH - an OpenSSH auth log, or
+# the synthetic generator when USE_DUMMY_DATA is on. Separate from the Windows
+# rules because the telemetry is a different shape, even though the techniques
+# overlap.
+#
+# Field reference:
+#   data.user       account named in the log line
+#   data.status     'Failed' | 'Accepted'
+#   source_ip       client IP parsed from the line
+#   data.hour       hour of the log timestamp, local
+#   is_off_hours    true when outside config.BUSINESS_HOURS
+
+rules:
+
+  - id: AUTH-BRUTE-FORCE
+    title: Brute Force Attack
+    source: authlog
+    severity: CRITICAL
+    technique: T1110
+    match:
+      data.status: Failed
+    correlate:
+      type: threshold
+      count: 5
+      window_seconds: 300
+      key: [source_ip, data.user]
+    message: 'Brute force from {source_ip} targeting "{data.user}" ({match_count} failures in 5m)'
+    dedup: [data.user, source_ip]
+    entities:
+      user: data.user
+      ip: source_ip
+      failure_count: match_count
+
+  - id: AUTH-PASSWORD-SPRAY
+    title: Password Spray
+    source: authlog
+    severity: CRITICAL
+    technique: T1110.003
+    match:
+      data.status: Failed
+    correlate:
+      type: distinct
+      distinct_field: data.user
+      count: 5
+      window_seconds: 300
+      key: [source_ip]
+    message: '{distinct_count} distinct accounts targeted from {source_ip} - consistent with password spraying'
+    dedup: [spray, source_ip]
+    entities:
+      ip: source_ip
+      account_count: distinct_count
+
+  - id: AUTH-OFF-HOURS-LOGIN
+    title: Off-Hours Login
+    source: authlog
+    severity: MEDIUM
+    technique: T1078
+    match:
+      data.status: Accepted
+    conditions:
+      - field: is_off_hours
+        equals: true
+    message: 'Off-hours login at {data.hour}:00 by "{data.user}" from {source_ip}'
+    dedup: [offhours, data.user, source_ip]
+    entities:
+      user: data.user
+      ip: source_ip
+      hour: data.hour
+
+  - id: AUTH-ROOT-LOGIN
+    title: Direct Root Login
+    source: authlog
+    severity: HIGH
+    technique: T1078.003
+    # Direct root/administrator authentication bypasses the audit trail that
+    # normal-user-then-elevate produces, and is usually disabled on purpose.
+    match:
+      data.status: Accepted
+    conditions:
+      - field: data.user
+        in: [root, admin, administrator]
+    message: 'Direct privileged login as "{data.user}" from {source_ip}'
+    dedup: [rootlogin, data.user, source_ip]
+    entities:
+      user: data.user
+      ip: source_ip
+
+  - id: AUTH-SUCCESS-AFTER-FAILURES
+    title: Successful Login After Repeated Failures
+    source: authlog
+    severity: CRITICAL
+    technique: T1110
+    # The outcome that actually matters: a brute force that *worked*. Relies on
+    # the parser flagging that this IP had recent failures.
+    match:
+      data.status: Accepted
+    conditions:
+      - field: data.recent_failures
+        gte: 3
+    message: 'Login as "{data.user}" from {source_ip} succeeded after {data.recent_failures} recent failures - possible successful brute force'
+    dedup: [breach, data.user, source_ip]
+    entities:
+      user: data.user
+      ip: source_ip
+      prior_failures: data.recent_failures

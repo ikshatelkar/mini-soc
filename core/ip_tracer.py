@@ -1,55 +1,87 @@
-import urllib.request
-import json
+"""IP geolocation lookups against ip-api.com.
+
+Never call this from a detection path. Lookups are network-bound and deliberately
+rate limited, so a caller can block for seconds; the enrichment worker exists so
+that waiting happens off to the side.
+
+Note on the provider: ip-api.com's free tier is plain HTTP only (TLS requires a
+paid key) and allows 45 requests/minute, banning sustained abuse. We ask for the
+minimum fields we need and stay under the budget on purpose - a brute-force wave
+from a botnet is exactly when enrichment must not get us blocked.
+"""
+
 import ipaddress
+import json
+import threading
+import time
+import urllib.request
 
-# In-memory cache so same IP is only looked up once per session
-_geo_cache = {}
-
-# Private/reserved IP ranges - these cannot be geolocated
-PRIVATE_PREFIXES = ('10.', '192.168.', '127.', '172.16.', '172.17.',
-                    '172.18.', '172.19.', '172.20.', '172.21.', '172.22.',
-                    '172.23.', '172.24.', '172.25.', '172.26.', '172.27.',
-                    '172.28.', '172.29.', '172.30.', '172.31.', '169.254.', '::1')
+API_URL = 'http://ip-api.com/json/{ip}?fields=status,message,country,city,isp,lat,lon,query'
 
 
-def _is_private(ip: str) -> bool:
-    """Return True if the IP is a private/loopback/reserved address."""
+class RateLimiter:
+    """Spaces calls evenly to stay under a per-minute budget.
+
+    Even spacing rather than a burst-then-stall bucket, because the provider
+    measures per minute and a burst is what trips abuse detection.
+    """
+
+    def __init__(self, per_minute: int):
+        self._interval = 60.0 / max(1, per_minute)
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_allowed - now)
+            self._next_allowed = max(now, self._next_allowed) + self._interval
+        if wait > 0:
+            time.sleep(wait)
+
+
+def is_geolocatable(ip: str) -> bool:
+    """True only for public unicast addresses.
+
+    `is_global` rather than `not is_private`, so loopback, link-local, multicast,
+    broadcast and reserved ranges are all excluded - none of them can be
+    geolocated and asking wastes rate-limit budget.
+    """
     try:
-        return ipaddress.ip_address(ip).is_private
+        return ipaddress.ip_address(ip).is_global
     except ValueError:
-        return True
+        return False
 
 
-def geolocate_ip(ip: str) -> dict | None:
+def geolocate_ip(ip: str, timeout: float = 5.0,
+                 limiter: RateLimiter | None = None) -> tuple[dict | None, str]:
+    """Resolve an IP to a location.
+
+    Returns (geo, status) where status is one of:
+      'success' - geo is populated
+      'private' - not a routable public address, no lookup attempted
+      'failed'  - the provider rejected it or the call errored
     """
-    Look up the geolocation of a public IP address using the free ip-api.com service.
-    Returns a dict with keys: country, city, isp, lat, lon, query
-    Returns None for private/invalid IPs or if the lookup fails.
-    Caches results in memory.
-    """
-    if not ip or _is_private(ip):
-        return None
+    if not ip or not is_geolocatable(ip):
+        return None, 'private'
 
-    if ip in _geo_cache:
-        return _geo_cache[ip]
+    if limiter is not None:
+        limiter.acquire()
 
     try:
-        url = f"http://ip-api.com/json/{ip}?fields=status,country,city,isp,lat,lon,query"
-        with urllib.request.urlopen(url, timeout=3) as response:
+        with urllib.request.urlopen(API_URL.format(ip=ip), timeout=timeout) as response:
             data = json.loads(response.read().decode())
+    except Exception as exc:
+        print(f'[!] Geo lookup failed for {ip}: {exc}')
+        return None, 'failed'
 
-        if data.get('status') == 'success':
-            result = {
-                'country': data.get('country', 'Unknown'),
-                'city':    data.get('city', 'Unknown'),
-                'isp':     data.get('isp', 'Unknown'),
-                'lat':     data.get('lat'),
-                'lon':     data.get('lon'),
-                'query':   data.get('query', ip),
-            }
-            _geo_cache[ip] = result
-            return result
-    except Exception as e:
-        print(f"[!] Geo lookup failed for {ip}: {e}")
+    if data.get('status') != 'success':
+        return None, 'failed'
 
-    return None
+    return {
+        'country': data.get('country') or 'Unknown',
+        'city':    data.get('city') or 'Unknown',
+        'isp':     data.get('isp') or 'Unknown',
+        'lat':     data.get('lat'),
+        'lon':     data.get('lon'),
+    }, 'success'

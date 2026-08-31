@@ -1,0 +1,124 @@
+# Windows service, persistence and defence-tampering detections (System channel).
+#
+# Unlike the Security channel rules, these need NO administrator privileges. That
+# makes them the useful floor of coverage on a workstation running Mini SOC
+# unelevated - service installation is one of the most common persistence
+# techniques and it is fully visible here.
+
+rules:
+
+  - id: WIN-SERVICE-INSTALLED
+    title: Service Installed
+    source: winevt
+    severity: MEDIUM
+    technique: T1543.003
+    match:
+      channel: System
+      event_id: 7045
+    severity_when:
+      # A service pointing at a script host, an encoded command, or a
+      # user-writable directory is an implant. A vendor binary under Program
+      # Files is a software update.
+      - severity: CRITICAL
+        conditions:
+          - field: data.ImagePath
+            contains_any:
+              - powershell
+              - pwsh
+              - -enc
+              - -encodedcommand
+              - cmd.exe /c
+              - mshta
+              - rundll32
+              - regsvr32
+              - wscript
+              - cscript
+              - certutil
+              - bitsadmin
+              - \temp\
+              - \appdata\
+              - \users\public\
+              - \programdata\
+              - \windows\temp\
+    message: 'New service "{data.ServiceName}" installed ({data.StartType}) running as {data.AccountName}'
+    dedup: [data.ServiceName]
+    entities:
+      service: data.ServiceName
+      image_path: data.ImagePath
+      start_type: data.StartType
+      account: data.AccountName
+
+  - id: WIN-DEFENSIVE-SERVICE-MODIFIED
+    title: Defensive Service Modified
+    source: winevt
+    severity: CRITICAL
+    technique: T1562.001
+    # Tuned against real data. Event 7040 fired 521 times across one ordinary
+    # workstation's history - Windows Update, BITS and the Modules Installer flip
+    # start types as routine maintenance. So the signal is not "a start type
+    # changed" but "a *defensive* service's start type changed": disabling
+    # Defender, the firewall or the event log is a recognised precursor to attack.
+    match:
+      channel: System
+      event_id: 7040
+    conditions:
+      - field: is_defensive_service
+        equals: true
+    message: 'Start type of security service "{service_name}" changed to {data.param2} - possible attempt to disable defences'
+    dedup: [defensive, service_name]
+    entities:
+      service: service_name
+      new_start_type: data.param2
+
+  - id: WIN-SERVICE-START-TYPE-CHANGED
+    title: Service Start Type Changed
+    source: winevt
+    # LOW on purpose: recorded for context and charted, but below the
+    # notification floor so routine Windows churn never interrupts anyone.
+    severity: LOW
+    technique: T1543.003
+    match:
+      channel: System
+      event_id: 7040
+    conditions:
+      - field: is_defensive_service
+        equals: false
+    message: 'Start type changed for service "{service_name}" to {data.param2}'
+    dedup: [service_name]
+    entities:
+      service: service_name
+      new_start_type: data.param2
+
+  - id: WIN-SYSTEM-LOG-CLEARED
+    title: Event Log Cleared
+    source: winevt
+    severity: CRITICAL
+    technique: T1070.001
+    match:
+      channel: System
+      event_id: 104
+    message: 'Event log "{data.Channel}" was cleared by "{data.SubjectUserName}" - possible anti-forensics'
+    dedup: [system-log-cleared]
+    entities:
+      channel: data.Channel
+      account: data.SubjectUserName
+
+  - id: WIN-SERVICE-CRASH-BURST
+    title: Repeated Service Crashes
+    source: winevt
+    severity: MEDIUM
+    technique: T1499
+    # 7034: a service terminated unexpectedly. One is a bug; several in a short
+    # window can be exploitation attempts or a deliberate crash of a defence.
+    match:
+      channel: System
+      event_id: 7034
+    correlate:
+      type: threshold
+      count: 3
+      window_seconds: 600
+      key: [data.param1]
+    message: 'Service "{data.param1}" crashed {match_count} times within 10 minutes'
+    dedup: [crash, data.param1]
+    entities:
+      service: data.param1
