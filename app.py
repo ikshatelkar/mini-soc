@@ -395,6 +395,25 @@ def api_ingest():
             when = event.get('time')
             if isinstance(when, str):
                 event['time'] = datetime.fromisoformat(when)
+
+            # Attribution comes from the authenticated agent, never from the
+            # payload. The token proves *which enrolled worker* is talking;
+            # the body is attacker-controlled if a token is ever stolen, so
+            # trusting its 'host' would let one worker file alerts against
+            # another machine - forging activity onto a colleague's PC, or
+            # burying its own by attributing it elsewhere.
+            #
+            # The machine's self-reported hostname is kept separately rather
+            # than discarded: it is genuinely useful for triage, and it
+            # legitimately differs from the agent name (the admin labels a
+            # worker at enrollment, e.g. 'FRONT-DESK-PC', which need not match
+            # what Windows calls itself). A difference here is normal, not a
+            # signal - which is exactly why it cannot be the trusted field.
+            reported_hostname = event.get('host')
+            event['host'] = agent['name']
+            if reported_hostname:
+                event['reported_hostname'] = reported_hostname
+
             engine.process(event)
             processed += 1
         except Exception as exc:
