@@ -12,11 +12,15 @@
             <h1 class="auth-title">Mini SOC</h1>
             <p class="auth-subtitle">Sign in to view alerts and monitoring status.</p>
 
+            {% if notice %}
+            <div class="auth-notice">{{ notice }}</div>
+            {% endif %}
             {% if error %}
             <div class="auth-error">{{ error }}</div>
             {% endif %}
 
             <form method="post" class="auth-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <label for="username">Username</label>
                 <input type="text" id="username" name="username" autocomplete="username" required autofocus>
 

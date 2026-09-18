@@ -23,7 +23,7 @@ import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from core.events import Alert  # type: ignore
+from core.events import Alert, HOSTNAME, SEVERITY_ORDER  # type: ignore
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'mini_soc.db')
 
@@ -157,13 +157,34 @@ def init_db() -> None:
 
     # Dashboard login. Deliberately just one admin account for now - see
     # core/auth.py. UNIQUE on username rather than a fixed single-row design so
-    # a future multi-admin pass doesn't need a schema change.
+    # a future multi-admin pass doesn't need a schema change. session_token
+    # holds the one currently-valid session for this admin - logging in
+    # anywhere overwrites it, which is what makes a session cookie issued
+    # elsewhere stop working the moment a new login happens.
     c.execute('''
         CREATE TABLE IF NOT EXISTS admin_users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
             password_hash TEXT,
+            session_token TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    existing_admin_cols = {row[1] for row in c.execute('PRAGMA table_info(admin_users)').fetchall()}
+    if 'session_token' not in existing_admin_cols:
+        c.execute('ALTER TABLE admin_users ADD COLUMN session_token TEXT')
+
+    # Admin-assigned employee name per computer, for the Employees page. This
+    # is the only person<->machine mapping this tool keeps - alerts only ever
+    # carry a host, never a person, so attributing activity to "who" needs an
+    # explicit, admin-maintained mapping rather than anything inferred from
+    # the data.
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS computers (
+            host TEXT PRIMARY KEY,
+            employee_name TEXT,
+            updated_at DATETIME
         )
     ''')
 
@@ -402,7 +423,7 @@ def get_needs_attention(limit: int = 25) -> list[dict]:
 
 
 def get_lifecycle_counts() -> dict:
-    """Counts behind the KPI row: what's open vs handled, and how urgent."""
+    """Counts behind the KPI row and the sidebar's per-status badges."""
     conn = get_connection()
     c = conn.cursor()
     c.execute('''
@@ -414,11 +435,18 @@ def get_lifecycle_counts() -> dict:
     by_status = {r['status']: {'urgent': r['urgent'], 'total': r['total']} for r in c.fetchall()}
     conn.close()
     open_stats = by_status.get('open', {'urgent': 0, 'total': 0})
-    handled = sum(v['total'] for k, v in by_status.items() if k != 'open')
+    acknowledged_total = by_status.get('acknowledged', {'total': 0})['total']
+    dismissed_total = by_status.get('dismissed', {'total': 0})['total']
     return {
         'needs_attention': open_stats['urgent'],
         'open_total': open_stats['total'],
-        'handled_total': handled,
+        # Kept for the existing "Handled" KPI stat tile, which has always
+        # meant "everything not open" (acknowledged + dismissed combined) -
+        # the sidebar badges below need the two split apart instead.
+        'handled_total': acknowledged_total + dismissed_total,
+        'acknowledged_total': acknowledged_total,
+        'dismissed_total': dismissed_total,
+        'total': open_stats['total'] + acknowledged_total + dismissed_total,
     }
 
 
@@ -472,6 +500,25 @@ def get_admin_user(username: str) -> dict | None:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_admin_user_by_id(admin_id: int) -> dict | None:
+    conn = get_connection()
+    row = conn.execute(
+        'SELECT * FROM admin_users WHERE id = ?', (admin_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_admin_session_token(admin_id: int, token: str | None) -> None:
+    """Stamp the one currently-valid session token for this admin (or clear it
+    on logout). See core/auth.py for how this enforces a single active
+    session."""
+    conn = get_connection()
+    conn.execute('UPDATE admin_users SET session_token = ? WHERE id = ?', (token, admin_id))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -603,21 +650,20 @@ def apply_geo_to_alerts(conn: sqlite3.Connection, ip: str, geo: dict | None,
 # Reads (dashboard)
 # ---------------------------------------------------------------------------
 
-def get_recent_alerts(limit: int = 100, status: str | None = None) -> list[dict]:
-    """Recent alerts, optionally filtered to one lifecycle status.
+# Worst-first ordering used by both the 24h activity feed and the All Alerts
+# page: CRITICAL=0 ... INFO=4, so `ORDER BY {this}, last_seen DESC` always
+# puts the most urgent severity on top and, within a severity, the newest
+# occurrence on top - a fresh MEDIUM alert then surfaces above older MEDIUMs
+# instead of getting lost in a purely chronological list, without a fresh LOW
+# ever outranking a standing HIGH/CRITICAL. Built from SEVERITY_ORDER rather
+# than hardcoded so the two stay in sync.
+_SEVERITY_SQL_RANK = {sev: i for i, sev in enumerate(reversed(SEVERITY_ORDER))}
+_SEVERITY_RANK_SQL = 'CASE severity ' + ' '.join(
+    f"WHEN '{sev}' THEN {rank}" for sev, rank in _SEVERITY_SQL_RANK.items()
+) + ' ELSE 99 END'
 
-    `status='open'` backs the "Needs Attention" / active view; omitting it
-    backs the full history view.
-    """
-    conn = get_connection()
-    c = conn.cursor()
-    if status:
-        c.execute('SELECT * FROM alerts WHERE status = ? ORDER BY last_seen DESC, id DESC LIMIT ?',
-                  (status, limit))
-    else:
-        c.execute('SELECT * FROM alerts ORDER BY last_seen DESC, id DESC LIMIT ?', (limit,))
-    rows = [dict(r) for r in c.fetchall()]
-    conn.close()
+
+def _hydrate_entities(rows: list[dict]) -> list[dict]:
     for row in rows:
         if row.get('entities'):
             try:
@@ -625,6 +671,153 @@ def get_recent_alerts(limit: int = 100, status: str | None = None) -> list[dict]
             except (TypeError, ValueError):
                 row['entities'] = {}
     return rows
+
+
+def get_recent_alerts(limit: int = 200, status: str | None = None, hours: int = 24) -> list[dict]:
+    """The main dashboard's Activity Log: only the last `hours` of activity,
+    worst severity first and newest-within-that-severity next (see
+    _SEVERITY_RANK_SQL). Alerts older than the window still exist and are
+    still counted everywhere else - they just roll off this feed onto the
+    All Alerts page (get_all_alerts) instead of disappearing.
+
+    `status='open'` narrows to the active view; omitting it shows every
+    lifecycle state within the window.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    # last_seen is stored via utc_iso() ('T' separator, +00:00 offset), which
+    # SQLite's own datetime('now', ...) does not produce (space separator, no
+    # offset) - comparing the two lexicographically silently misorders rows,
+    # so the cutoff is built in Python using the same format instead.
+    cutoff = utc_iso(datetime.now(timezone.utc) - timedelta(hours=hours))
+    if status:
+        c.execute(f'''
+            SELECT * FROM alerts
+            WHERE last_seen >= ? AND status = ?
+            ORDER BY {_SEVERITY_RANK_SQL}, last_seen DESC, id DESC
+            LIMIT ?
+        ''', (cutoff, status, limit))
+    else:
+        c.execute(f'''
+            SELECT * FROM alerts
+            WHERE last_seen >= ?
+            ORDER BY {_SEVERITY_RANK_SQL}, last_seen DESC, id DESC
+            LIMIT ?
+        ''', (cutoff, limit))
+    rows = _hydrate_entities([dict(r) for r in c.fetchall()])
+    conn.close()
+    return rows
+
+
+def get_all_alerts(*, severity: str | None = None, module: str | None = None,
+                    status: str | None = None, since: str | None = None,
+                    until: str | None = None, search: str | None = None,
+                    host: str | None = None, limit: int = 100, offset: int = 0) -> dict:
+    """Full alert history for the All Alerts page: worst severity first,
+    newest first within a severity (see _SEVERITY_RANK_SQL) - no time window,
+    unlike get_recent_alerts. `since`/`until` are ISO datetime strings
+    compared against last_seen. `host` backs the Employees page's per-computer
+    alert list. Returns the page plus a total count so the frontend can
+    render pagination without a second round trip.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    where: list[str] = []
+    params: list = []
+    if severity:
+        where.append('severity = ?')
+        params.append(severity.upper())
+    if module:
+        where.append('module = ?')
+        params.append(module)
+    if host:
+        where.append('host = ?')
+        params.append(host)
+    if status:
+        where.append('status = ?')
+        params.append(status)
+    if since:
+        where.append('last_seen >= ?')
+        params.append(since)
+    if until:
+        where.append('last_seen <= ?')
+        params.append(until)
+    if search:
+        where.append('(description LIKE ? OR source_ip LIKE ?)')
+        like = f'%{search}%'
+        params.extend([like, like])
+    clause = f"WHERE {' AND '.join(where)}" if where else ''
+
+    total = c.execute(f'SELECT COUNT(*) FROM alerts {clause}', params).fetchone()[0]
+    c.execute(f'''
+        SELECT * FROM alerts {clause}
+        ORDER BY {_SEVERITY_RANK_SQL}, last_seen DESC, id DESC
+        LIMIT ? OFFSET ?
+    ''', (*params, limit, offset))
+    rows = _hydrate_entities([dict(r) for r in c.fetchall()])
+    conn.close()
+    return {'alerts': rows, 'total': total, 'limit': limit, 'offset': offset}
+
+
+# ---------------------------------------------------------------------------
+# Employees (computer -> employee name)
+# ---------------------------------------------------------------------------
+
+def set_employee_name(host: str, employee_name: str | None) -> None:
+    """Assign (or clear, with employee_name=None) the employee name shown
+    for this host on the Employees page."""
+    conn = get_connection()
+    conn.execute('''
+        INSERT INTO computers (host, employee_name, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(host) DO UPDATE SET employee_name = excluded.employee_name,
+                                         updated_at = excluded.updated_at
+    ''', (host, employee_name, utc_iso()))
+    conn.commit()
+    conn.close()
+
+
+def get_employees_overview() -> list[dict]:
+    """One row per computer this SOC knows about, each with its
+    admin-assigned employee name (if set) and a rollup of its alerts.
+
+    "Known about" includes hosts with zero alerts yet - an enrolled worker
+    or this local machine should be nameable before its first alert ever
+    fires, not only after.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+
+    rollups: dict[str, dict] = {}
+    for row in c.execute('''
+        SELECT host,
+               COUNT(*) AS total,
+               SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_count,
+               SUM(CASE WHEN status = 'open' AND severity IN ('HIGH', 'CRITICAL')
+                   THEN 1 ELSE 0 END) AS urgent_count,
+               MAX(last_seen) AS most_recent
+        FROM alerts
+        WHERE host IS NOT NULL AND host != ''
+        GROUP BY host
+    '''):
+        rollups[row['host']] = dict(row)
+
+    employee_names = {row['host']: row['employee_name']
+                       for row in c.execute('SELECT host, employee_name FROM computers')}
+    agent_hosts = {row['name'] for row in c.execute('SELECT name FROM agents')}
+    conn.close()
+
+    all_hosts = set(rollups) | agent_hosts | set(employee_names) | {HOSTNAME}
+
+    overview = [{
+        'host': host,
+        'employee_name': employee_names.get(host),
+        'total': rollups.get(host, {}).get('total', 0),
+        'open_count': rollups.get(host, {}).get('open_count', 0),
+        'urgent_count': rollups.get(host, {}).get('urgent_count', 0),
+        'most_recent': rollups.get(host, {}).get('most_recent'),
+    } for host in all_hosts]
+    overview.sort(key=lambda o: o['most_recent'] or '', reverse=True)
+    return overview
 
 
 def get_alert_stats() -> dict:

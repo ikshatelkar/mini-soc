@@ -57,7 +57,29 @@
     --shadow-card: 0 1px 2px rgba(11, 11, 11, 0.04), 0 1px 8px rgba(11, 11, 11, 0.04);
 
     --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-nav: 'Inter', var(--font-ui);
     --font-mono: "SFMono-Regular", "Roboto Mono", Consolas, "Liberation Mono", monospace;
+
+    /* Sidebar-only tokens. Kept separate from --status-* (severity, fixed
+       across themes) and --cat-* (monitoring source) - these encode a third,
+       unrelated scale: alert *lifecycle* (active/handled/dismissed), which
+       must never borrow severity's colors or it stops meaning what it says. */
+    --sidebar-bg:        #ffffff;
+    --sidebar-hover:     #f0f1f3;
+    --sidebar-active-bg: #eef4ff;
+    --accent:            #2563eb;
+    --accent-hover:      #1d4ed8;
+    --badge-danger-bg:    #fef2f2;
+    --badge-danger-text:  #dc2626;
+    --badge-success-bg:   #f0fdf4;
+    --badge-success-text: #16a34a;
+    --badge-neutral-bg:   #f3f4f6;
+    --badge-neutral-text: #6b7280;
+    --brand-bg: #dc2626;
+    --brand-on: #ffffff;
+    --sidebar-width: 256px;
+    --sidebar-width-collapsed: 64px;
+    --transition-base: 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -90,6 +112,20 @@
         --cat-2: #d95926;
         --cat-3: #199e70;
         --cat-4: #c98500;
+
+        --sidebar-bg:        #1a1d24;
+        --sidebar-hover:     #23272f;
+        --sidebar-active-bg: #172340;
+        --accent:            #60a5fa;
+        --accent-hover:      #3b82f6;
+        --badge-danger-bg:    #3b1318;
+        --badge-danger-text:  #f87171;
+        --badge-success-bg:   #0f2a18;
+        --badge-success-text: #4ade80;
+        --badge-neutral-bg:   #2d3039;
+        --badge-neutral-text: #9ca3af;
+        --brand-bg: #b91c1c;
+        --brand-on: #ffffff;
     }
 }
 
@@ -117,6 +153,20 @@
     --cat-2: #d95926;
     --cat-3: #199e70;
     --cat-4: #c98500;
+
+    --sidebar-bg:        #1a1d24;
+    --sidebar-hover:     #23272f;
+    --sidebar-active-bg: #172340;
+    --accent:            #60a5fa;
+    --accent-hover:      #3b82f6;
+    --badge-danger-bg:    #3b1318;
+    --badge-danger-text:  #f87171;
+    --badge-success-bg:   #0f2a18;
+    --badge-success-text: #4ade80;
+    --badge-neutral-bg:   #2d3039;
+    --badge-neutral-text: #9ca3af;
+    --brand-bg: #b91c1c;
+    --brand-on: #ffffff;
 }
 
 /* ==========================================================================
@@ -171,12 +221,6 @@ button {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-}
-
-.header-title h1 {
-    margin: 0;
-    font-size: 1.15rem;
-    color: var(--text-primary);
 }
 
 .status-pill {
@@ -260,6 +304,298 @@ button {
     color: var(--text-muted);
     font-family: var(--font-mono);
 }
+
+/* ==========================================================================
+   Sidebar navigation
+
+   Its own token set (--sidebar-*, --accent, --badge-*, --brand-*, defined in
+   the theme blocks above) deliberately doesn't borrow --status-*: those
+   encode alert *severity* and are fixed by design, while these encode alert
+   *lifecycle* (active/handled/dismissed) - a different scale that must not
+   collide with severity's colors. Icons are Tabler's webfont (<i class="ti
+   ti-*">), loaded in _base.html - no per-icon markup beyond a class name.
+   ========================================================================== */
+
+.app-shell {
+    display: flex;
+    align-items: stretch;
+    min-height: 100vh;
+}
+
+.sidebar {
+    width: var(--sidebar-width);
+    height: 100vh;
+    flex-shrink: 0;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    /* Sticky, not fixed - the page (body) scrolls as a whole, same as the
+       header's own position:sticky, so the two stay pinned together instead
+       of the sidebar scrolling away on a long page. */
+    position: sticky;
+    top: 0;
+    transition: width var(--transition-base);
+    overflow: hidden;
+}
+
+.sidebar.collapsed { width: var(--sidebar-width-collapsed); }
+
+.collapse-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background-color: var(--accent);
+    border: 2px solid var(--sidebar-bg);
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 28px;
+    right: -13px;
+    z-index: 10;
+    cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+    transition: background-color var(--transition-base), transform 150ms ease;
+}
+
+.collapse-btn:hover { background-color: var(--accent-hover); transform: scale(1.08); }
+.collapse-btn:active { transform: scale(0.94); }
+.collapse-btn i { font-size: 14px; transition: transform var(--transition-base); }
+.sidebar.collapsed .collapse-btn i { transform: rotate(180deg); }
+
+.brand {
+    padding: 20px 16px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 72px;
+    flex-shrink: 0;
+}
+
+.brand-icon {
+    width: 34px;
+    height: 34px;
+    min-width: 34px;
+    border-radius: 8px;
+    background-color: var(--brand-bg);
+    color: var(--brand-on);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+}
+
+.brand-text { white-space: nowrap; overflow: hidden; transition: opacity var(--transition-base); }
+.brand-name { font-family: var(--font-nav); font-size: 15px; font-weight: 600; line-height: 1.25; color: var(--text-primary); }
+.brand-sub { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+.sidebar.collapsed .brand-text { opacity: 0; width: 0; }
+
+.nav { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 12px 10px 8px; }
+.nav-group { margin-bottom: 16px; }
+
+.nav-group-label {
+    font-family: var(--font-nav);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    padding: 0 8px 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    overflow: hidden;
+    transition: opacity var(--transition-base);
+}
+
+.sidebar.collapsed .nav-group-label { opacity: 0; height: 0; padding: 0; margin: 0; }
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 38px;
+    padding: 0 8px;
+    margin-bottom: 2px;
+    border-radius: 8px;
+    text-decoration: none;
+    background: transparent;
+    border: none;
+    width: 100%;
+    font-family: inherit;
+    cursor: pointer;
+    position: relative;
+    transition: background-color var(--transition-base);
+}
+
+.nav-item:hover { background-color: var(--sidebar-hover); }
+.nav-item.active { background-color: var(--sidebar-active-bg); }
+.nav-item.active .nav-icon { color: var(--accent); }
+.nav-item.active .nav-label { color: var(--accent); font-weight: 500; }
+
+.nav-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+
+.nav-icon {
+    font-size: 19px;
+    color: var(--text-secondary);
+    min-width: 20px;
+    text-align: center;
+    transition: color var(--transition-base);
+}
+
+.nav-label {
+    font-family: var(--font-nav);
+    font-size: 13.5px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: opacity var(--transition-base);
+}
+
+.sidebar.collapsed .nav-label { opacity: 0; width: 0; }
+
+.badge {
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.6;
+    padding: 1px 8px;
+    border-radius: 99px;
+    white-space: nowrap;
+    transition: opacity var(--transition-base);
+}
+
+.sidebar.collapsed .badge { opacity: 0; width: 0; padding: 0; }
+.badge-danger { background-color: var(--badge-danger-bg); color: var(--badge-danger-text); }
+.badge-success { background-color: var(--badge-success-bg); color: var(--badge-success-text); }
+.badge-neutral { background-color: var(--badge-neutral-bg); color: var(--badge-neutral-text); }
+
+.notif-dot {
+    display: none;
+    width: 7px;
+    height: 7px;
+    background-color: var(--badge-danger-text);
+    border-radius: 50%;
+    border: 2px solid var(--sidebar-bg);
+    position: absolute;
+    top: 6px;
+    right: 10px;
+}
+
+.sidebar.collapsed .nav-item[data-alert] .notif-dot { display: block; }
+
+.sidebar-bottom {
+    border-top: 1px solid var(--border);
+    padding: 8px 10px 12px;
+    flex-shrink: 0;
+}
+
+.sidebar-bottom .nav-icon { color: var(--text-muted); }
+.sidebar-bottom .nav-label { color: var(--text-secondary); }
+
+.sidebar-tooltip {
+    display: none;
+    position: fixed;
+    background-color: var(--text-primary);
+    color: var(--sidebar-bg);
+    font-family: var(--font-nav);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 6px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 100;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.nav::-webkit-scrollbar { width: 4px; }
+.nav::-webkit-scrollbar-track { background: transparent; }
+.nav::-webkit-scrollbar-thumb { background-color: var(--border); border-radius: 4px; }
+
+.theme-icon-light, .theme-icon-dark { display: none; }
+:root:not([data-theme="dark"]) .theme-icon-light { display: inline; }
+:root[data-theme="dark"] .theme-icon-dark { display: inline; }
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .theme-icon-light { display: none; }
+    :root:not([data-theme="light"]) .theme-icon-dark { display: inline; }
+}
+
+.app-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ==========================================================================
+   All Alerts page: filter toolbar + pagination
+   ========================================================================== */
+
+.filter-bar {
+    display: flex;
+    align-items: end;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-4);
+}
+
+.filter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.filter-field label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.filter-field select,
+.filter-field input {
+    font-family: inherit;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    background-color: var(--surface-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.45rem 0.6rem;
+}
+
+.filter-field input[type="search"] { min-width: 200px; }
+
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.pagination .icon-btn:disabled { opacity: 0.4; pointer-events: none; }
+
+/* ==========================================================================
+   Employees page
+   ========================================================================== */
+
+.employee-name-input {
+    font-family: inherit;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    background-color: var(--surface-sunken);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.4rem 0.6rem;
+    width: 100%;
+    max-width: 220px;
+    transition: background-color 0.2s;
+}
+
+.employee-name-input.saved-flash { background-color: var(--status-good-bg); }
 
 /* ==========================================================================
    Layout
@@ -461,8 +797,25 @@ button {
 
 .charts-row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+    /* Stacked by default - with the sidebar expanded (256px) there isn't
+       reliably enough width left for two Plotly charts side by side without
+       squeezing each one into the label-collision territory fixed above.
+       Widens to two columns below once the sidebar frees up that space -
+       see the .sidebar.collapsed rule. */
+    grid-template-columns: 1fr;
     gap: var(--space-4);
+}
+
+.sidebar.collapsed ~ .app-main .charts-row {
+    grid-template-columns: 1fr 1fr;
+}
+
+@media (max-width: 760px) {
+    /* Even collapsed, a phone-width viewport doesn't have room for two -
+       the sidebar itself is only ~64px of the savings. */
+    .sidebar.collapsed ~ .app-main .charts-row {
+        grid-template-columns: 1fr;
+    }
 }
 
 .chart-container {
@@ -470,8 +823,19 @@ button {
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     padding: var(--space-4);
-    min-height: 340px;
+    height: 340px;
+    /* Plotly measures its target div's size at render time; without a fixed
+       height here (min-height alone isn't enough) a narrower column - e.g.
+       after the sidebar took 256px of page width - can make it compute a
+       wrong size and spill its legend/labels into the next card. This also
+       hard-clips the rare case where it still gets it wrong. */
+    overflow: hidden;
     box-shadow: var(--shadow-card);
+}
+
+.chart-container > div {
+    width: 100%;
+    height: 100%;
 }
 
 #attack-world-map {
@@ -479,6 +843,11 @@ button {
     height: 460px;
     border-radius: var(--radius-md);
     overflow: hidden;
+}
+
+.attack-world-map-full {
+    height: calc(100vh - 260px);
+    min-height: 460px;
 }
 
 /* ==========================================================================
@@ -751,6 +1120,15 @@ button {
 .auth-error {
     background: var(--status-critical-bg);
     color: var(--status-critical);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    font-size: 0.85rem;
+    margin-bottom: var(--space-4);
+}
+
+.auth-notice {
+    background: var(--status-warning-bg);
+    color: var(--status-warning);
     border-radius: var(--radius-sm);
     padding: var(--space-2) var(--space-3);
     font-size: 0.85rem;

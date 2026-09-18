@@ -1,38 +1,24 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mini SOC</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-</head>
-<body>
-    <header class="soc-header">
-        <div class="header-title">
-            <h1>Mini SOC</h1>
-            <span class="status-pill good" id="header-status-pill">
-                <span class="pulse-dot"></span>
-                <span id="header-status-text">Checking...</span>
-            </span>
-        </div>
-        <div class="header-actions">
-            <span class="pipeline-indicator advanced-only" id="pipeline-indicator" title="Alert processing queue depth"></span>
-            <div class="mode-toggle" id="mode-toggle" role="group" aria-label="Detail level">
-                <button data-mode="simple" class="active" type="button">Simple</button>
-                <button data-mode="advanced" type="button">Advanced</button>
-            </div>
-            <button class="icon-btn" id="theme-toggle" type="button" title="Toggle light/dark">🌓 Theme</button>
-            <button class="icon-btn primary" onclick="window.location.href='/api/export'" type="button">
-                Export CSV
-            </button>
-            <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
-                <button class="icon-btn" type="submit" title="Sign out">Logout</button>
-            </form>
-        </div>
-    </header>
+{% extends "_base.html" %}
 
-    <main class="soc-container">
+{% block title %} - Home{% endblock %}
+
+{% block extra_head %}
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+{% endblock %}
+
+{% block header_extra %}
+    <span class="status-pill good" id="header-status-pill">
+        <span class="pulse-dot"></span>
+        <span id="header-status-text">Checking...</span>
+    </span>
+{% endblock %}
+
+{% block header_actions %}
+    <span class="pipeline-indicator advanced-only" id="pipeline-indicator" title="Alert processing queue depth"></span>
+    {{ super() }}
+{% endblock %}
+
+{% block content %}
 
         <!-- Needs Attention: the one thing this page must answer immediately -->
         <section class="card" id="attention-card">
@@ -67,8 +53,8 @@
 
         <!-- Charts -->
         <div class="charts-row">
-            <div class="chart-container" id="alerts-by-type-pie-container">
-                <div id="alerts-by-type-pie"></div>
+            <div class="chart-container" id="alerts-by-type-bar-container">
+                <div id="alerts-by-type-bar"></div>
             </div>
             <div class="chart-container" id="alerts-by-severity-bar-container">
                 <div id="alerts-by-severity-bar"></div>
@@ -79,7 +65,7 @@
         <section class="card">
             <div class="section-header">
                 <h2>🌍 Where Activity Is Coming From</h2>
-                <span class="section-subtitle" id="map-status">Waiting for data...</span>
+                <span class="section-subtitle"><span id="map-status">Waiting for data...</span> · <a href="{{ url_for('map_page') }}">full map</a></span>
             </div>
             <div id="attack-world-map"></div>
         </section>
@@ -88,6 +74,7 @@
         <section class="card">
             <div class="section-header">
                 <h2>Activity Log</h2>
+                <span class="section-subtitle">Last 24 hours, worst severity first · <a href="{{ url_for('all_alerts_page') }}">see full history</a></span>
                 <div class="table-tabs" id="log-tabs" role="tablist">
                     <button data-status="open" class="active" type="button">Open</button>
                     <button data-status="" type="button">All</button>
@@ -140,8 +127,8 @@
             </details>
         </section>
 
-    </main>
+{% endblock %}
 
+{% block scripts %}
     <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
-</body>
-</html>
+{% endblock %}

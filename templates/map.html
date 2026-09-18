@@ -1,0 +1,21 @@
+{% extends "_base.html" %}
+
+{% block title %} - Map{% endblock %}
+
+{% block extra_head %}
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+{% endblock %}
+
+{% block content %}
+        <section class="card">
+            <div class="section-header">
+                <h2>🌍 Where Activity Is Coming From</h2>
+                <span class="section-subtitle" id="map-status">Waiting for data...</span>
+            </div>
+            <div id="attack-world-map" class="attack-world-map-full"></div>
+        </section>
+{% endblock %}
+
+{% block scripts %}
+    <script src="{{ url_for('static', filename='js/map-page.js') }}"></script>
+{% endblock %}

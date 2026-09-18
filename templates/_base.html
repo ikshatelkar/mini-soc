@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>Mini SOC{% block title %}{% endblock %}</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.6.0/tabler-icons.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar" id="sidebar">
+            <button class="collapse-btn" id="sidebar-collapse-btn" type="button" aria-label="Collapse sidebar" aria-expanded="true">
+                <i class="ti ti-chevron-left"></i>
+            </button>
+
+            <div class="brand">
+                <div class="brand-icon"><i class="ti ti-shield-lock"></i></div>
+                <div class="brand-text">
+                    <div class="brand-name">Mini SOC</div>
+                    <div class="brand-sub">Security operations</div>
+                </div>
+            </div>
+
+            <nav class="nav">
+                <div class="nav-group">
+                    <div class="nav-group-label">Overview</div>
+                    <a class="nav-item {{ 'active' if active_page == 'home' }}" href="{{ url_for('index') }}">
+                        <div class="nav-left">
+                            <i class="ti ti-layout-dashboard nav-icon"></i>
+                            <span class="nav-label">Dashboard</span>
+                        </div>
+                    </a>
+                    <a class="nav-item {{ 'active' if active_page == 'all' }}" href="{{ url_for('all_alerts_page') }}" data-alert>
+                        <div class="nav-left">
+                            <i class="ti ti-bell nav-icon"></i>
+                            <span class="nav-label">All alerts</span>
+                        </div>
+                        <span class="badge badge-neutral" id="badge-all">&ndash;</span>
+                        <span class="notif-dot"></span>
+                    </a>
+                </div>
+
+                <div class="nav-group">
+                    <div class="nav-group-label">Triage</div>
+                    <a class="nav-item {{ 'active' if active_page == 'active' }}" href="{{ url_for('all_alerts_page', status='open') }}" data-alert>
+                        <div class="nav-left">
+                            <i class="ti ti-alert-triangle nav-icon" style="color: var(--badge-danger-text);"></i>
+                            <span class="nav-label">Active</span>
+                        </div>
+                        <span class="badge badge-danger" id="badge-active">&ndash;</span>
+                        <span class="notif-dot"></span>
+                    </a>
+                    <a class="nav-item {{ 'active' if active_page == 'handled' }}" href="{{ url_for('all_alerts_page', status='acknowledged') }}">
+                        <div class="nav-left">
+                            <i class="ti ti-circle-check nav-icon" style="color: var(--badge-success-text);"></i>
+                            <span class="nav-label">Handled</span>
+                        </div>
+                        <span class="badge badge-success" id="badge-handled">&ndash;</span>
+                    </a>
+                    <a class="nav-item {{ 'active' if active_page == 'dismissed' }}" href="{{ url_for('all_alerts_page', status='dismissed') }}">
+                        <div class="nav-left">
+                            <i class="ti ti-circle-x nav-icon"></i>
+                            <span class="nav-label">Dismissed</span>
+                        </div>
+                        <span class="badge badge-neutral" id="badge-dismissed">&ndash;</span>
+                    </a>
+                </div>
+
+                <div class="nav-group">
+                    <div class="nav-group-label">Operations</div>
+                    <a class="nav-item {{ 'active' if active_page == 'map' }}" href="{{ url_for('map_page') }}">
+                        <div class="nav-left">
+                            <i class="ti ti-map-pin nav-icon"></i>
+                            <span class="nav-label">Threat map</span>
+                        </div>
+                    </a>
+                    <a class="nav-item {{ 'active' if active_page == 'employees' }}" href="{{ url_for('employees_page') }}">
+                        <div class="nav-left">
+                            <i class="ti ti-users nav-icon"></i>
+                            <span class="nav-label">Employees</span>
+                        </div>
+                    </a>
+                </div>
+            </nav>
+
+            <div class="sidebar-bottom">
+                <a class="nav-item" href="{{ url_for('api_export') }}">
+                    <div class="nav-left">
+                        <i class="ti ti-download nav-icon"></i>
+                        <span class="nav-label">Export CSV</span>
+                    </div>
+                </a>
+                <button class="nav-item" id="theme-toggle" type="button">
+                    <div class="nav-left">
+                        <i class="ti ti-sun nav-icon theme-icon-light"></i>
+                        <i class="ti ti-moon nav-icon theme-icon-dark"></i>
+                        <span class="nav-label">Theme</span>
+                    </div>
+                </button>
+            </div>
+        </aside>
+
+        <div class="sidebar-tooltip" id="sidebar-tooltip"></div>
+
+        <div class="app-main">
+            <header class="soc-header">
+                <div class="header-title">
+                    {% block header_extra %}{% endblock %}
+                </div>
+                <div class="header-actions">
+                    {% block header_actions %}
+                    <div class="mode-toggle" id="mode-toggle" role="group" aria-label="Detail level">
+                        <button data-mode="simple" class="active" type="button">Simple</button>
+                        <button data-mode="advanced" type="button">Advanced</button>
+                    </div>
+                    <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button class="icon-btn" type="submit" title="Sign out">Logout</button>
+                    </form>
+                    {% endblock %}
+                </div>
+            </header>
+
+            <main class="soc-container">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/common.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,59 @@
+{% extends "_base.html" %}
+
+{% block title %} - Employees{% endblock %}
+
+{% block content %}
+        <section class="card">
+            <div class="section-header">
+                <h2>Employees</h2>
+                <span class="section-subtitle">One row per computer this SOC has ever seen - name each one, then see what it's had.</span>
+            </div>
+
+            <div class="soc-table-wrap">
+                <table class="soc-table" id="employees-table">
+                    <thead>
+                        <tr>
+                            <th>Computer</th>
+                            <th>Employee</th>
+                            <th>Open</th>
+                            <th class="advanced-only">Urgent (open)</th>
+                            <th>Total Alerts</th>
+                            <th>Last Activity</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="employees-table-body">
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="card" id="employee-alerts-card" hidden>
+            <div class="section-header">
+                <h2 id="employee-alerts-heading">Alerts</h2>
+                <button class="icon-btn" id="employee-alerts-close" type="button">Close</button>
+            </div>
+            <div class="soc-table-wrap">
+                <table class="soc-table">
+                    <thead>
+                        <tr>
+                            <th>When</th>
+                            <th class="advanced-only">Source</th>
+                            <th>Severity</th>
+                            <th>What Happened</th>
+                            <th class="advanced-only">ATT&amp;CK</th>
+                            <th>Status</th>
+                            <th>Origin</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="employee-alerts-table-body">
+                    </tbody>
+                </table>
+            </div>
+        </section>
+{% endblock %}
+
+{% block scripts %}
+    <script src="{{ url_for('static', filename='js/employees.js') }}"></script>
+{% endblock %}

@@ -272,6 +272,12 @@ SESSION_LIFETIME_HOURS = 12
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_MINUTES = 5
 
+# Marks the session cookie Secure (browser will only ever send it over HTTPS).
+# Stays False while the dashboard is plain HTTP on 127.0.0.1 - a Secure cookie
+# on plain HTTP is simply never sent back, which would break login outright.
+# Flip to True once Phase 5's TLS work lands.
+FORCE_SECURE_COOKIES = False
+
 # ---------------------------------------------------------------------------
 # Local overrides (secrets)
 # ---------------------------------------------------------------------------

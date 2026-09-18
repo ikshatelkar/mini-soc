@@ -1,92 +1,10 @@
 const FETCH_INTERVAL = 3000;
 
-// ---------------------------------------------------------------------------
-// Theme + detail-level toggles (persisted, so a choice survives a refresh)
-// ---------------------------------------------------------------------------
-
-function initThemeToggle() {
-    const saved = localStorage.getItem('soc-theme');
-    if (saved) document.documentElement.setAttribute('data-theme', saved);
-
-    document.getElementById('theme-toggle').addEventListener('click', () => {
-        const current = document.documentElement.getAttribute('data-theme')
-            || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-        const next = current === 'dark' ? 'light' : 'dark';
-        document.documentElement.setAttribute('data-theme', next);
-        localStorage.setItem('soc-theme', next);
-        // Chart colors are read from CSS custom properties at render time, so
-        // they need a manual re-render on theme flip rather than waiting for
-        // the next poll.
-        refreshAll();
-    });
-}
-
-function initModeToggle() {
-    const saved = localStorage.getItem('soc-mode') || 'simple';
-    document.body.setAttribute('data-mode', saved);
-    document.querySelectorAll('#mode-toggle button').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.mode === saved);
-        btn.addEventListener('click', () => {
-            document.body.setAttribute('data-mode', btn.dataset.mode);
-            localStorage.setItem('soc-mode', btn.dataset.mode);
-            document.querySelectorAll('#mode-toggle button').forEach(b =>
-                b.classList.toggle('active', b === btn));
-        });
-    });
-}
-
-function cssVar(name) {
-    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-// Module identity -> plain-language label + categorical color (identifies the
-// monitoring source, never severity - those are different scales).
-const MODULE_INFO = {
-    WINEVT:   { label: 'System Activity',  varName: '--cat-1' },
-    AUTHLOG:  { label: 'Login Attempts',   varName: '--cat-2' },
-    FIM:      { label: 'File Changes',     varName: '--cat-3' },
-    NETWORK:  { label: 'Network Activity', varName: '--cat-4' },
-    LOG_MONITOR: { label: 'Login Attempts', varName: '--cat-2' },
-};
-
-function moduleLabel(module) {
-    return (MODULE_INFO[module] && MODULE_INFO[module].label) || module;
-}
-
-function moduleColor(module) {
-    const info = MODULE_INFO[module];
-    return cssVar(info ? info.varName : '--text-muted') || '#898781';
-}
-
-// Severity -> status color. Status colors are fixed, never per-module.
-const SEVERITY_VAR = {
-    CRITICAL: '--status-critical',
-    HIGH: '--status-serious',
-    MEDIUM: '--status-warning',
-    LOW: '--text-muted',
-    INFO: '--text-muted',
-};
-
-function severityColor(sev) {
-    return cssVar(SEVERITY_VAR[sev] || '--text-muted') || '#898781';
-}
-
-const SEVERITY_ICON = { CRITICAL: '\u{1F6A8}', HIGH: '⚠️', MEDIUM: '●', LOW: '○', INFO: '○' };
-
-function relativeTime(isoString) {
-    if (!isoString) return 'unknown';
-    const then = new Date(isoString).getTime();
-    const diffSec = Math.round((Date.now() - then) / 1000);
-    if (diffSec < 5) return 'just now';
-    if (diffSec < 60) return `${diffSec}s ago`;
-    const min = Math.round(diffSec / 60);
-    if (min < 60) return `${min}m ago`;
-    const hr = Math.round(min / 60);
-    if (hr < 24) return `${hr}h ago`;
-    const day = Math.round(hr / 24);
-    if (day < 30) return `${day}d ago`;
-    return new Date(isoString).toLocaleDateString();
-}
+// csrfToken/apiFetch, theme+mode toggles, cssVar, MODULE_INFO/moduleLabel/
+// moduleColor, severityColor/SEVERITY_ICON, relativeTime, escapeHtml,
+// redirectIfUnauthorized, and the alert-lifecycle action helpers
+// (acknowledge/dismiss/reopen, statusBadge, rowActions, renderAlertTable)
+// all live in common.js, shared with the All Alerts page.
 
 // ---------------------------------------------------------------------------
 // Fetching
@@ -96,18 +14,6 @@ let lastStats = { modules: {}, severities: {}, total_events: 0, mapped_origins: 
                   lifecycle: { needs_attention: 0, open_total: 0, handled_total: 0 } };
 let currentLogStatus = 'open';
 
-// A session can expire (or be revoked) while the dashboard is sitting open in
-// a tab. Every poll hits this same login-gated API, so checking once here
-// and sending the tab back to /login is simpler than teaching every render
-// function what an empty/401 response means.
-function redirectIfUnauthorized(response) {
-    if (response.status === 401) {
-        window.location.href = '/login';
-        return true;
-    }
-    return false;
-}
-
 async function fetchStats() {
     try {
         const response = await fetch('/api/stats');
@@ -115,6 +21,7 @@ async function fetchStats() {
         lastStats = await response.json();
         renderCharts(lastStats);
         renderKPIs(lastStats);
+        updateSidebarBadges(lastStats);
     } catch (err) {
         console.error('Error fetching stats:', err);
     }
@@ -175,23 +82,10 @@ async function fetchAgents() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Actions
-// ---------------------------------------------------------------------------
-
-async function postAction(path) {
-    try {
-        const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-        if (redirectIfUnauthorized(response)) return;
-        await Promise.all([fetchNeedsAttention(), fetchAlerts(), fetchStats()]);
-    } catch (err) {
-        console.error('Action failed:', err);
-    }
-}
-
-function acknowledgeAlert(id) { postAction(`/api/alerts/${id}/acknowledge`); }
-function dismissAlert(id) { postAction(`/api/alerts/${id}/dismiss`); }
-function reopenAlert(id) { postAction(`/api/alerts/${id}/reopen`); }
+// Alert lifecycle actions (acknowledge/dismiss/reopen) live in common.js;
+// after any of them succeeds there, refresh everything this page shows that
+// could have changed.
+setAlertsChangedHandler(() => Promise.all([fetchNeedsAttention(), fetchAlerts(), fetchStats()]));
 
 // ---------------------------------------------------------------------------
 // Rendering: Needs Attention hero
@@ -251,12 +145,6 @@ function renderAttentionCard(a) {
         </div>`;
 }
 
-function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str ?? '';
-    return div.innerHTML;
-}
-
 // ---------------------------------------------------------------------------
 // Rendering: KPIs
 // ---------------------------------------------------------------------------
@@ -278,36 +166,42 @@ function renderKPIs(stats) {
 // ---------------------------------------------------------------------------
 // Rendering: charts
 // ---------------------------------------------------------------------------
-
-function chartLayoutDefaults() {
-    return {
-        font: { family: 'system-ui, sans-serif', color: cssVar('--text-secondary') },
-        paper_bgcolor: 'rgba(0,0,0,0)',
-        plot_bgcolor: 'rgba(0,0,0,0)',
-        margin: { t: 40, b: 40, l: 40, r: 40 },
-        titlefont: { size: 15, color: cssVar('--text-primary') },
-    };
-}
+//
+// chartLayoutDefaults/renderWorldMap live in common.js - shared with the
+// standalone Map page.
 
 function renderCharts(stats) {
     const modules = stats.modules || {};
-    const moduleKeys = Object.keys(modules);
+    // Ascending, so the largest ends up at the top of the horizontal bar -
+    // Plotly draws categories bottom-to-top by default, so this reads like a
+    // normal ranked leaderboard instead of upside down.
+    const moduleKeys = Object.keys(modules).sort((a, b) => modules[a] - modules[b]);
 
-    const pieData = [{
-        values: moduleKeys.map(k => modules[k]),
-        labels: moduleKeys.map(moduleLabel),
-        type: 'pie',
-        hole: 0.55,
+    // A pie/donut breaks down completely once one source dominates - real
+    // deployments are often 95%+ auth log noise, which leaves every other
+    // slice an invisible sliver. A bar keeps every source legible regardless
+    // of how skewed the split is, the same reason the severity chart next to
+    // it is already a bar and not a pie.
+    const moduleBarData = [{
+        x: moduleKeys.map(k => modules[k]),
+        y: moduleKeys.map(moduleLabel),
+        type: 'bar',
+        orientation: 'h',
         marker: {
-            colors: moduleKeys.map(moduleColor),
-            line: { color: cssVar('--surface-card'), width: 2 },
+            color: moduleKeys.map(moduleColor),
+            line: { color: cssVar('--border'), width: 1 },
         },
-        textinfo: 'label+percent',
-        hoverinfo: 'label+value',
+        text: moduleKeys.map(k => modules[k]),
+        textposition: 'auto',
+        hoverinfo: 'y+x',
     }];
-    Plotly.react('alerts-by-type-pie', pieData,
-        { ...chartLayoutDefaults(), title: 'Activity by Source' },
-        { displayModeBar: false, responsive: true });
+    Plotly.react('alerts-by-type-bar', moduleBarData, {
+        ...chartLayoutDefaults(),
+        title: 'Activity by Source',
+        xaxis: { gridcolor: cssVar('--gridline') },
+        yaxis: { automargin: true },
+        showlegend: false,
+    }, { displayModeBar: false, responsive: true });
 
     const severities = stats.severities || {};
     const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
@@ -327,47 +221,6 @@ function renderCharts(stats) {
         title: 'Volume by Severity',
         xaxis: { gridcolor: cssVar('--gridline') },
         yaxis: { gridcolor: cssVar('--gridline') },
-    }, { displayModeBar: false, responsive: true });
-}
-
-function renderWorldMap(geoData) {
-    const statusEl = document.getElementById('map-status');
-    if (!geoData || geoData.length === 0) {
-        statusEl.textContent = 'No external activity mapped yet.';
-        Plotly.react('attack-world-map', [], { ...chartLayoutDefaults() },
-            { displayModeBar: false, responsive: true });
-        return;
-    }
-    statusEl.textContent = `${geoData.length} location${geoData.length === 1 ? '' : 's'}`;
-
-    const data = [{
-        type: 'scattergeo',
-        mode: 'markers',
-        lat: geoData.map(d => d.geo_lat),
-        lon: geoData.map(d => d.geo_lon),
-        text: geoData.map(d => `${d.source_ip}<br>${d.geo_city}, ${d.geo_country}<br>${d.geo_isp}<br>Events: ${d.hit_count}`),
-        marker: {
-            size: geoData.map(d => Math.log2(d.hit_count + 1) * 8 + 5),
-            color: geoData.map(d => severityColor(d.severity)),
-            line: { color: cssVar('--surface-card'), width: 1 },
-            opacity: 0.85,
-        },
-    }];
-
-    Plotly.react('attack-world-map', data, {
-        ...chartLayoutDefaults(),
-        geo: {
-            projection: { type: 'robinson' },
-            bgcolor: 'rgba(0,0,0,0)',
-            showland: true,
-            landcolor: cssVar('--surface-sunken') || cssVar('--gridline'),
-            showocean: true,
-            oceancolor: cssVar('--surface-page'),
-            showlakes: false,
-            showcountries: true,
-            countrycolor: cssVar('--gridline'),
-        },
-        margin: { t: 0, b: 0, l: 0, r: 0 },
     }, { displayModeBar: false, responsive: true });
 }
 
@@ -454,7 +307,7 @@ function renderAgents(agents) {
 async function revokeAgent(id, name) {
     if (!confirm(`Revoke access for "${name}"? It will stop being able to send events immediately.`)) return;
     try {
-        const response = await fetch(`/api/agents/${id}`, { method: 'DELETE' });
+        const response = await apiFetch(`/api/agents/${id}`, { method: 'DELETE' });
         if (redirectIfUnauthorized(response)) return;
         await fetchAgents();
     } catch (err) {
@@ -471,7 +324,7 @@ function initAgentEnrollment() {
         const name = input.value.trim();
         if (!name) return;
         try {
-            const response = await fetch('/api/agents', {
+            const response = await apiFetch('/api/agents', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name }),
@@ -528,50 +381,9 @@ function initLogTabs() {
     });
 }
 
-function statusBadge(status) {
-    const label = { open: 'Open', acknowledged: 'Handled', dismissed: 'Dismissed' }[status] || status;
-    return `<span class="status-badge ${status}">${label}</span>`;
-}
-
-function rowActions(alert) {
-    if (alert.status === 'open') {
-        return `<div class="row-actions">
-            <button type="button" onclick="acknowledgeAlert(${alert.id})">Handle</button>
-            <button type="button" onclick="dismissAlert(${alert.id})">Dismiss</button>
-        </div>`;
-    }
-    return `<div class="row-actions"><button type="button" onclick="reopenAlert(${alert.id})">Reopen</button></div>`;
-}
-
 function updateTable(alerts) {
-    const tbody = document.getElementById('alerts-table-body');
-    tbody.innerHTML = '';
-
-    if (!alerts || alerts.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="empty-note">Nothing here.</td></tr>`;
-        return;
-    }
-
-    alerts.forEach(a => {
-        const tr = document.createElement('tr');
-        const origin = a.geo_country ? `${a.geo_city}, ${a.geo_country}` : (a.source_ip || 'This device');
-        const technique = a.technique ? `<span class="technique-badge">${a.technique}</span>` : '';
-        const ruleTag = a.rule_id ? `<div class="rule-tag">${a.rule_id}</div>` : '';
-        const countBadge = a.occurrence_count > 1
-            ? `<span class="count-badge repeat">×${a.occurrence_count}</span>` : '';
-
-        tr.innerHTML = `
-            <td class="mono" style="color: var(--text-muted); white-space: nowrap;" title="${a.last_seen || a.timestamp}">${relativeTime(a.last_seen || a.timestamp)}</td>
-            <td class="advanced-only"><strong>${moduleLabel(a.module)}</strong>${ruleTag}</td>
-            <td><span class="severity-chip ${a.severity}">${SEVERITY_ICON[a.severity] || ''} ${a.severity}</span></td>
-            <td>${escapeHtml(a.description)} ${countBadge}</td>
-            <td class="advanced-only">${technique}</td>
-            <td>${statusBadge(a.status || 'open')}</td>
-            <td style="font-size: 0.85em">${origin}<div class="advanced-only" style="color:var(--text-muted); font-size:0.85em">${a.geo_isp || ''}</div></td>
-            <td>${rowActions(a)}</td>
-        `;
-        tbody.appendChild(tr);
-    });
+    renderAlertTable(document.getElementById('alerts-table-body'), alerts,
+        'Nothing in the last 24 hours. Older activity is on the All Alerts page.');
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +397,8 @@ async function refreshAll() {
 }
 
 function initDashboard() {
-    initThemeToggle();
+    initSidebar();
+    initThemeToggle(refreshAll);
     initModeToggle();
     initLogTabs();
     initAgentEnrollment();

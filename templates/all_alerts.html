@@ -1,0 +1,90 @@
+{% extends "_base.html" %}
+
+{% block title %} - {{ heading }}{% endblock %}
+
+{% block content %}
+        <section class="card">
+            <div class="section-header">
+                <h2>{{ heading }}</h2>
+                <span class="section-subtitle">{{ subtitle }}</span>
+            </div>
+
+            <div class="filter-bar">
+                <div class="filter-field">
+                    <label for="filter-severity">Severity</label>
+                    <select id="filter-severity">
+                        <option value="">Any</option>
+                        <option value="CRITICAL">Critical</option>
+                        <option value="HIGH">High</option>
+                        <option value="MEDIUM">Medium</option>
+                        <option value="LOW">Low</option>
+                        <option value="INFO">Info</option>
+                    </select>
+                </div>
+                <div class="filter-field">
+                    <label for="filter-status">Status</label>
+                    <select id="filter-status">
+                        <option value="">Any</option>
+                        <option value="open">Open</option>
+                        <option value="acknowledged">Handled</option>
+                        <option value="dismissed">Dismissed</option>
+                    </select>
+                </div>
+                <div class="filter-field">
+                    <label for="filter-module">Source</label>
+                    <select id="filter-module">
+                        <option value="">Any</option>
+                        <option value="WINEVT">System Activity</option>
+                        <option value="AUTHLOG">Login Attempts (auth log)</option>
+                        <option value="LOG_MONITOR">Login Attempts (parsed log)</option>
+                        <option value="FIM">File Changes</option>
+                        <option value="NETWORK">Network Activity</option>
+                    </select>
+                </div>
+                <div class="filter-field">
+                    <label for="filter-since">From</label>
+                    <input type="date" id="filter-since">
+                </div>
+                <div class="filter-field">
+                    <label for="filter-until">To</label>
+                    <input type="date" id="filter-until">
+                </div>
+                <div class="filter-field">
+                    <label for="filter-search">Search</label>
+                    <input type="search" id="filter-search" placeholder="Description or IP...">
+                </div>
+                <button class="icon-btn" id="filter-clear" type="button">Clear filters</button>
+            </div>
+
+            <div class="soc-table-wrap">
+                <table class="soc-table">
+                    <thead>
+                        <tr>
+                            <th>When</th>
+                            <th class="advanced-only">Source</th>
+                            <th>Severity</th>
+                            <th>What Happened</th>
+                            <th class="advanced-only">ATT&amp;CK</th>
+                            <th>Status</th>
+                            <th>Origin</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="all-alerts-table-body">
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="pagination">
+                <span id="pagination-summary"></span>
+                <div class="header-actions">
+                    <button class="icon-btn" id="pagination-prev" type="button">← Previous</button>
+                    <button class="icon-btn" id="pagination-next" type="button">Next →</button>
+                </div>
+            </div>
+        </section>
+{% endblock %}
+
+{% block scripts %}
+    <script src="{{ url_for('static', filename='js/all-alerts.js') }}"></script>
+{% endblock %}

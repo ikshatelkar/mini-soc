@@ -8,14 +8,16 @@ from flask import (  # type: ignore
 
 import config  # type: ignore
 from core.auth import (  # type: ignore
-    clear_attempts, ensure_secret_key, hash_password, is_locked_out, login_required,
-    record_failed_attempt, verify_login,
+    clear_attempts, ensure_secret_key, get_csrf_token, hash_password, is_locked_out,
+    issue_session_token, login_required, record_failed_attempt, validate_csrf_token,
+    verify_login,
 )
 from core.db import (  # type: ignore
     AlertNotFoundError, admin_exists, bulk_set_status, create_admin_user, create_agent,
-    delete_agent, export_alerts_to_csv, get_agent_by_token, get_alert_stats,
-    get_connection, get_geomap_points, get_lifecycle_counts, get_needs_attention,
-    get_recent_alerts, init_db, list_agents, set_alert_status, touch_agent_last_seen,
+    delete_agent, export_alerts_to_csv, get_agent_by_token, get_all_alerts, get_alert_stats,
+    get_connection, get_employees_overview, get_geomap_points, get_lifecycle_counts,
+    get_needs_attention, get_recent_alerts, init_db, list_agents, set_admin_session_token,
+    set_alert_status, set_employee_name, touch_agent_last_seen,
 )
 from core.detect import engine, load_ruleset, process_winevt  # type: ignore
 from core.dummy_log_generator import run_generator  # type: ignore
@@ -29,6 +31,44 @@ from core.winevt import collector_stats, start_event_log_collectors  # type: ign
 app = Flask(__name__)
 app.secret_key = ensure_secret_key()
 app.permanent_session_lifetime = timedelta(hours=config.SESSION_LIFETIME_HOURS)
+app.jinja_env.globals['csrf_token'] = get_csrf_token
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=config.FORCE_SECURE_COOKIES,
+)
+
+# Paths that legitimately receive a state-changing request without a browser
+# session cookie at all, so there is no CSRF token to check:
+#  - /api/ingest: agent bearer-token auth (core/db.py's agents table), never
+#    a cookie holder.
+#  - /api/notifications/pending: GET-only already, exempt via the safe-method
+#    check below, not listed here.
+_CSRF_EXEMPT_PATHS = {'/api/ingest'}
+
+
+@app.before_request
+def _enforce_csrf():
+    """Reject any state-changing request that doesn't echo back this
+    session's CSRF token - see core/auth.py for how the token is minted and
+    checked. Runs before login_required, so an unauthenticated POST/DELETE
+    still gets rejected here rather than leaking whether a route exists."""
+    if request.method in ('GET', 'HEAD', 'OPTIONS') or request.path in _CSRF_EXEMPT_PATHS:
+        return None
+    candidate = request.form.get('csrf_token') or request.headers.get('X-CSRFToken')
+    if not validate_csrf_token(candidate):
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'invalid or missing CSRF token'}), 400
+        return 'Invalid or expired form submission. Go back and try again.', 400
+    return None
+
+
+@app.after_request
+def _security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    return response
 
 
 def start_background_services() -> None:
@@ -87,6 +127,12 @@ def login():
         return redirect(url_for('index'))
 
     error = None
+    # Set by login_required when it clears a session it found stale because
+    # this admin logged in somewhere else - see core/auth.py's
+    # session_is_current(). Told apart from a plain "not logged in" so it
+    # doesn't look like a random, unexplained logout.
+    notice = ('This account was signed in somewhere else, so this session was '
+              'signed out.') if request.args.get('reason') == 'elsewhere' else None
     if request.method == 'POST':
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
@@ -103,17 +149,27 @@ def login():
                 session.permanent = True
                 session['admin_id'] = user['id']
                 session['admin_username'] = user['username']
+                # Overwrites the admin's stored token, so any session cookie
+                # issued by a previous login - this browser or another one -
+                # stops authenticating on its very next request.
+                session['session_token'] = issue_session_token(user['id'])
                 next_path = request.args.get('next', '')
                 # Only ever redirect somewhere inside this app - an unchecked
                 # `next` value could otherwise send a fresh login to an
                 # attacker-controlled URL.
                 dest = next_path if next_path.startswith('/') and not next_path.startswith('//') else url_for('index')
                 return redirect(dest)
-    return render_template('login.html', error=error)
+    return render_template('login.html', error=error, notice=notice)
 
 
 @app.route('/logout', methods=['POST'])
 def logout():
+    admin_id = session.get('admin_id')
+    if admin_id is not None:
+        # Clears the stored token outright rather than leaving the old one in
+        # place, so a captured-but-not-yet-used cookie can't sign back in
+        # after an explicit logout either.
+        set_admin_session_token(admin_id, None)
     session.clear()
     return redirect(url_for('login'))
 
@@ -121,18 +177,91 @@ def logout():
 @app.route('/')
 @login_required
 def index():
-    return render_template('index.html')
+    return render_template('index.html', active_page='home')
+
+
+_ALL_ALERTS_VIEWS = {
+    'open': ('active', 'Active Alerts', 'Still open, worst severity first'),
+    'acknowledged': ('handled', 'Handled Alerts', 'Handled, worst severity first'),
+    'dismissed': ('dismissed', 'Dismissed Alerts', 'Dismissed, worst severity first'),
+}
+
+
+@app.route('/alerts')
+@login_required
+def all_alerts_page():
+    """One page backs all four "go to a new page" toggles (All Alerts,
+    Active, Handled, Dismissed) - they're the same filtered view, reached via
+    ?status=, so the heading below just reflects whichever one was clicked.
+    """
+    active_page, heading, subtitle = _ALL_ALERTS_VIEWS.get(
+        request.args.get('status'), ('all', 'All Alerts', 'Full history, worst severity first'))
+    return render_template('all_alerts.html', active_page=active_page, heading=heading, subtitle=subtitle)
+
+
+@app.route('/map')
+@login_required
+def map_page():
+    return render_template('map.html', active_page='map')
+
+
+@app.route('/employees')
+@login_required
+def employees_page():
+    return render_template('employees.html', active_page='employees')
 
 
 @app.route('/api/alerts')
 @login_required
 def api_alerts():
-    """Alerts, optionally filtered by lifecycle status via ?status=open etc.
-    Omit the filter for the full history view."""
+    """The dashboard's Activity Log: last 24h only, worst severity first -
+    see get_recent_alerts(). Optionally filtered by lifecycle status via
+    ?status=open etc. Full, unbounded history lives at /api/alerts/all."""
     status = request.args.get('status')
     if status and status not in ('open', 'acknowledged', 'dismissed'):
         return jsonify({'error': f"invalid status '{status}'"}), 400
     return jsonify(get_recent_alerts(status=status))
+
+
+_VALID_SEVERITIES = ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO')
+
+
+@app.route('/api/alerts/all')
+@login_required
+def api_alerts_all():
+    """The All Alerts page: full history, worst severity first, with the
+    filter/pagination options its toolbar exposes - see get_all_alerts()."""
+    status = request.args.get('status')
+    if status and status not in ('open', 'acknowledged', 'dismissed'):
+        return jsonify({'error': f"invalid status '{status}'"}), 400
+    severity = request.args.get('severity')
+    if severity and severity.upper() not in _VALID_SEVERITIES:
+        return jsonify({'error': f"invalid severity '{severity}'"}), 400
+    limit = min(request.args.get('limit', 100, type=int), 500)
+    offset = max(request.args.get('offset', 0, type=int), 0)
+    return jsonify(get_all_alerts(
+        severity=severity, module=request.args.get('module'), status=status,
+        since=request.args.get('since'), until=request.args.get('until'),
+        search=request.args.get('search'), host=request.args.get('host'),
+        limit=limit, offset=offset,
+    ))
+
+
+@app.route('/api/employees', methods=['GET', 'POST'])
+@login_required
+def api_employees():
+    """GET: one row per known computer with its assigned employee name and
+    alert rollup, for the Employees page. POST: assign/clear the employee
+    name for one host - see core/db.py's set_employee_name()."""
+    if request.method == 'POST':
+        body = request.get_json(silent=True) or {}
+        host = (body.get('host') or '').strip()
+        if not host:
+            return jsonify({'error': 'host is required'}), 400
+        employee_name = (body.get('employee_name') or '').strip() or None
+        set_employee_name(host, employee_name)
+        return jsonify({'host': host, 'employee_name': employee_name})
+    return jsonify(get_employees_overview())
 
 
 @app.route('/api/alerts/needs-attention')
