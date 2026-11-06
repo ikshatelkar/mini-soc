@@ -21,6 +21,10 @@ async function saveEmployeeName(host, input) {
             body: JSON.stringify({ host, employee_name }),
         });
         if (redirectIfUnauthorized(response)) return;
+        if (!response.ok) {
+            console.error(`Saving employee name failed: HTTP ${response.status}`);
+            return;
+        }
         input.classList.add('saved-flash');
         setTimeout(() => input.classList.remove('saved-flash'), 800);
     } catch (err) {
@@ -40,21 +44,28 @@ function renderEmployees(rows) {
     rows.forEach(r => {
         const tr = document.createElement('tr');
         const lastActivity = r.most_recent ? relativeTime(r.most_recent) : 'never';
-        const urgentCell = r.urgent_count > 0
-            ? `<span class="count-badge repeat">${r.urgent_count}</span>` : '0';
+        const urgent = Number(r.urgent_count) || 0;
+        const urgentCell = urgent > 0 ? `<span class="count-badge repeat">${urgent}</span>` : '0';
+        // The host travels as a data attribute rather than a string literal
+        // inside onclick - host names come from agents and event logs, and an
+        // escaped quote is un-escaped by the browser before the handler runs.
         tr.innerHTML = `
             <td class="mono"><strong>${escapeHtml(r.host)}</strong></td>
             <td>
                 <input type="text" class="employee-name-input" placeholder="Assign a name..."
                        value="${escapeHtml(r.employee_name || '')}" data-host="${escapeHtml(r.host)}">
             </td>
-            <td>${r.open_count}</td>
+            <td>${Number(r.open_count) || 0}</td>
             <td class="advanced-only">${urgentCell}</td>
-            <td>${r.total}</td>
-            <td style="color: var(--text-muted); font-size: 0.85em">${lastActivity}</td>
-            <td><div class="row-actions"><button type="button" onclick="showEmployeeAlerts('${escapeHtml(r.host)}')">View Alerts</button></div></td>
+            <td>${Number(r.total) || 0}</td>
+            <td style="color: var(--text-muted); font-size: 0.85em">${escapeHtml(lastActivity)}</td>
+            <td><div class="row-actions"><button type="button" class="view-alerts-btn" data-host="${escapeHtml(r.host)}">View Alerts</button></div></td>
         `;
         tbody.appendChild(tr);
+    });
+
+    tbody.querySelectorAll('.view-alerts-btn').forEach(btn => {
+        btn.addEventListener('click', () => showEmployeeAlerts(btn.dataset.host));
     });
 
     tbody.querySelectorAll('.employee-name-input').forEach(input => {
@@ -65,7 +76,12 @@ function renderEmployees(rows) {
     });
 }
 
+// Which host's alert list is open, kept explicitly rather than parsed back
+// out of the heading text.
+let openEmployeeHost = null;
+
 async function showEmployeeAlerts(host) {
+    openEmployeeHost = host;
     const card = document.getElementById('employee-alerts-card');
     const heading = document.getElementById('employee-alerts-heading');
     heading.textContent = `Alerts for ${host}`;
@@ -85,6 +101,7 @@ async function showEmployeeAlerts(host) {
 function initEmployeeAlertsClose() {
     document.getElementById('employee-alerts-close').addEventListener('click', () => {
         document.getElementById('employee-alerts-card').hidden = true;
+        openEmployeeHost = null;
     });
 }
 
@@ -92,11 +109,7 @@ function initEmployeeAlertsClose() {
 // reopen action, same pattern as the dashboard and All Alerts page.
 setAlertsChangedHandler(() => {
     fetchEmployees();
-    const card = document.getElementById('employee-alerts-card');
-    if (!card.hidden) {
-        const host = document.getElementById('employee-alerts-heading').textContent.replace('Alerts for ', '');
-        showEmployeeAlerts(host);
-    }
+    if (openEmployeeHost !== null) showEmployeeAlerts(openEmployeeHost);
 });
 
 document.addEventListener('DOMContentLoaded', () => {

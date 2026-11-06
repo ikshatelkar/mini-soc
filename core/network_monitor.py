@@ -83,9 +83,12 @@ def scan_connections() -> None:
     try:
         connections = psutil.net_connections(kind='inet')
     except psutil.AccessDenied:
+        # Skip this pass entirely. Treating it as "no sockets" would report
+        # every previously flagged listener/connection as closed - a false
+        # all-clear - and then re-alert on all of them next pass.
         _status.update(status='degraded',
-                       detail='Some sockets require elevation to attribute to a process.')
-        connections = []
+                       detail='Socket enumeration was denied; elevation may be required.')
+        return
     except Exception as exc:
         _status.update(status='error', detail=str(exc))
         return
@@ -136,9 +139,7 @@ def scan_connections() -> None:
 
     _reported.clear()
     _reported.update(current)
-    _status.update(status='running', listeners=listeners, connections=established)
-    if _status['detail'] is None:
-        _status['detail'] = None
+    _status.update(status='running', detail=None, listeners=listeners, connections=established)
 
 
 def monitor_status() -> dict:

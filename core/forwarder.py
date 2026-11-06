@@ -45,12 +45,21 @@ GENESIS_HASH = '0' * 64
 
 
 def _json_safe(event: dict) -> dict:
-    """Copy an event dict with its datetime 'time' field made JSON-serializable."""
+    """Copy an event into plain JSON types.
+
+    'time' becomes a UTC ISO string; anything else JSON can't represent (a
+    stray datetime or bytes value in `data`) is stringified. Round-tripping
+    through json here, once, means the dict that gets hashed is exactly what
+    is written to disk and later re-read for chain verification - otherwise a
+    non-JSON value would either crash submit() or hash differently on reload.
+    """
     safe = dict(event)
     when = safe.get('time')
     if isinstance(when, datetime):
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
         safe['time'] = when.astimezone(timezone.utc).isoformat()
-    return safe
+    return json.loads(json.dumps(safe, default=str))
 
 
 def _line_hash(seq: int, event_json: dict, prev_hash: str) -> str:

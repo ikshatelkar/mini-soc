@@ -175,8 +175,14 @@ class AlertPipeline:
                     print(f'[!] Failed to write alert: {exc}')
                     continue
 
-                if action == 'inserted':
-                    self.inserted += 1
+                if action in ('inserted', 'escalated'):
+                    # An escalation (same condition, now more severe) notifies
+                    # like a new alert: the human was told about the milder
+                    # version, not this one.
+                    if action == 'inserted':
+                        self.inserted += 1
+                    else:
+                        self.aggregated += 1
                     self.notifier.submit(alert)
                     if self.email_immediate is not None:
                         self.email_immediate.submit(alert)

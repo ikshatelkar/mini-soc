@@ -53,3 +53,14 @@ Mini SOC runs in one of three roles, set via `DEPLOYMENT_ROLE` in `config.py`:
 * **`agent`**: runs only the collectors (file integrity, log parsing, network, Windows Event Logs) via `agent.py` and forwards raw events to the server — it never loads rules, runs detection, or stores alerts locally, so a compromised worker can't learn what it's being watched for. Events are buffered to a hash-chained local file first, so a network outage loses nothing.
 
 For long-running deployments, `service.py` (with `service_install.bat` / `service_uninstall.bat`) installs Mini SOC as a native Windows service; since services can't draw UI, desktop popups are handled by the separate `notifier.py` companion running in the user's own session.
+
+---
+
+## 🧪 Tests
+The suite lives in `tests/` and runs with pytest (`pip install pytest`):
+
+```
+python -m pytest tests -q
+```
+
+Every test runs against its own throwaway SQLite database, so it never touches your real `mini_soc.db`, and no background services, network calls or desktop popups are started. It covers the rule engine and every shipped rule file, the storage layer, the HTTP API (auth, CSRF, ingest, lifecycle), the collectors, the agent forwarder, and notification/email delivery. If Node.js is installed it also checks that the dashboard's rendering code escapes hostile alert fields.

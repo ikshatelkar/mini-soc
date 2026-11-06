@@ -121,26 +121,28 @@ function renderAttention(alerts) {
 
 function renderAttentionCard(a) {
     const cardClass = a.severity === 'CRITICAL' ? 'critical' : 'serious';
-    const origin = a.geo_city ? `${a.geo_city}, ${a.geo_country}` : (a.source_ip || '');
+    const origin = alertOrigin(a, '');
     const technique = a.technique
-        ? `<span class="technique-badge">${a.technique}</span>` : '';
+        ? `<span class="technique-badge">${escapeHtml(a.technique)}</span>` : '';
+    const count = Number(a.occurrence_count) || 1;
+    const id = Number(a.id);
     return `
         <div class="attention-card ${cardClass}">
-            <span class="severity-chip ${a.severity}">${SEVERITY_ICON[a.severity] || ''} ${a.severity === 'CRITICAL' ? 'Critical' : 'High Priority'}</span>
+            <span class="severity-chip ${cssToken(a.severity)}">${SEVERITY_ICON[a.severity] || ''} ${a.severity === 'CRITICAL' ? 'Critical' : 'High Priority'}</span>
             <div class="attention-body">
                 <p class="attention-headline">${escapeHtml(a.description)}</p>
                 <div class="attention-meta">
-                    <span>${relativeTime(a.last_seen || a.timestamp)}</span>
-                    ${origin ? `<span>${origin}</span>` : ''}
-                    ${a.occurrence_count > 1 ? `<span>happened ${a.occurrence_count} times</span>` : ''}
+                    <span>${escapeHtml(relativeTime(a.last_seen || a.timestamp))}</span>
+                    ${origin ? `<span>${escapeHtml(origin)}</span>` : ''}
+                    ${count > 1 ? `<span>happened ${count} times</span>` : ''}
                 </div>
                 <div class="attention-technical advanced-only">
-                    ${a.rule_id || ''} ${technique}
+                    ${escapeHtml(a.rule_id || '')} ${technique}
                 </div>
             </div>
             <div class="attention-actions">
-                <button class="btn-action handle" type="button" onclick="acknowledgeAlert(${a.id})">Mark Handled</button>
-                <button class="btn-action dismiss" type="button" onclick="dismissAlert(${a.id})">Dismiss</button>
+                <button class="btn-action handle" type="button" onclick="acknowledgeAlert(${id})">Mark Handled</button>
+                <button class="btn-action dismiss" type="button" onclick="dismissAlert(${id})">Dismiss</button>
             </div>
         </div>`;
 }
@@ -253,8 +255,8 @@ function renderScope(scope) {
     }
     el.innerHTML = scope.map(s => `
         <div class="scope-chip ${s.exists ? '' : 'missing'}">
-            <span>\u{1F4C1} ${s.path}</span>
-            <span class="scope-count">${s.exists ? `${s.file_count} file(s) watched` : 'not found'}</span>
+            <span>\u{1F4C1} ${escapeHtml(s.path)}</span>
+            <span class="scope-count">${s.exists ? `${Number(s.file_count) || 0} file(s) watched` : 'not found'}</span>
         </div>`).join('');
 }
 
@@ -265,17 +267,17 @@ function renderTelemetry(channels, network) {
 
     (channels || []).forEach(ch => {
         const s = TELEMETRY_STATUS_LABEL[ch.status] || { icon: '⚪', text: ch.status, cls: '' };
-        const detail = ch.status === 'running' ? `${ch.events_seen} event(s)` : s.text;
+        const detail = ch.status === 'running' ? `${Number(ch.events_seen) || 0} event(s)` : s.text;
         chips.push(`<div class="scope-chip ${s.cls}" title="${escapeHtml(ch.detail || s.text)}">
-            <span>${s.icon} ${ch.channel}</span><span class="scope-count">${detail}</span></div>`);
+            <span>${s.icon} ${escapeHtml(ch.channel)}</span><span class="scope-count">${escapeHtml(detail)}</span></div>`);
     });
 
     if (network) {
         const s = TELEMETRY_STATUS_LABEL[network.status] || { icon: '⚪', text: network.status, cls: '' };
         const detail = (network.status === 'running' || network.status === 'degraded')
-            ? `${network.listeners} listening, ${network.connections} established` : s.text;
+            ? `${Number(network.listeners) || 0} listening, ${Number(network.connections) || 0} established` : s.text;
         chips.push(`<div class="scope-chip ${s.cls}" title="${escapeHtml(network.detail || s.text)}">
-            <span>${s.icon} Network sockets</span><span class="scope-count">${detail}</span></div>`);
+            <span>${s.icon} Network sockets</span><span class="scope-count">${escapeHtml(detail)}</span></div>`);
     }
     el.innerHTML = chips.join('');
 }
@@ -296,12 +298,19 @@ function renderAgents(agents) {
     el.innerHTML = agents.map(a => {
         const s = AGENT_STATUS_LABEL[a.status] || { icon: '⚪', cls: '' };
         const lastSeen = a.last_seen ? relativeTime(a.last_seen) : 'never';
+        // id/name travel as data attributes, not as string literals spliced
+        // into an onclick handler: HTML-escaping is undone by the browser
+        // before the JS runs, so a name containing a quote could otherwise
+        // break out of the string and execute.
         return `<div class="scope-chip ${s.cls}">
             <span>${s.icon} ${escapeHtml(a.name)}</span>
-            <span class="scope-count">${a.status} · last seen ${lastSeen}</span>
-            <button type="button" class="icon-btn agent-revoke" onclick="revokeAgent(${a.id}, '${escapeHtml(a.name)}')" title="Revoke this worker's access">Revoke</button>
+            <span class="scope-count">${escapeHtml(a.status)} · last seen ${escapeHtml(lastSeen)}</span>
+            <button type="button" class="icon-btn agent-revoke" data-agent-id="${Number(a.id)}" data-agent-name="${escapeHtml(a.name)}" title="Revoke this worker's access">Revoke</button>
         </div>`;
     }).join('');
+    el.querySelectorAll('.agent-revoke').forEach(btn => {
+        btn.addEventListener('click', () => revokeAgent(btn.dataset.agentId, btn.dataset.agentName));
+    });
 }
 
 async function revokeAgent(id, name) {

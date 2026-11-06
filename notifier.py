@@ -46,15 +46,28 @@ SEVERITY_RANK = {'CRITICAL': 4, 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1, 'INFO': 0}
 
 
 def _dashboard_url() -> str:
-    return f'http://{config.WEB_HOST}:{config.WEB_PORT}'
+    # The notifier always runs on the same machine as the dashboard. A
+    # wildcard bind (0.0.0.0 / ::) is not a connectable address, so dial
+    # loopback then; otherwise dial exactly what the dashboard is bound to -
+    # app.py's pending-alerts endpoint accepts that address as local too.
+    host = config.WEB_HOST
+    if host in ('0.0.0.0', ''):
+        host = '127.0.0.1'
+    elif host == '::':
+        host = '::1'
+    if ':' in host:
+        host = f'[{host}]'
+    return f'http://{host}:{config.WEB_PORT}'
 
 
-def _load_last_seen_id() -> int:
+def _load_last_seen_id() -> int | None:
+    """The last alert id already shown, or None if there is no saved state
+    (first run) - which main() treats as "start from now", not "from id 0"."""
     try:
         with open(STATE_FILE, 'r', encoding='utf-8') as f:
-            return int(json.load(f).get('last_seen_id', 0))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return 0
+            return int(json.load(f)['last_seen_id'])
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
 
 
 def _save_last_seen_id(value: int) -> None:
@@ -97,16 +110,23 @@ def _deliver(alerts: list[dict]) -> None:
         worst = max(alerts, key=lambda a: SEVERITY_RANK.get(a.get('severity'), 0))
         _show_popup(
             f'Mini SOC: {len(alerts)} new alerts',
-            f'Most severe: {worst["description"][:100]}\nOpen the dashboard for the rest.',
+            f'Most severe: {(worst.get("description") or "")[:100]}\n'
+            f'Open the dashboard for the rest.',
         )
         return
     for alert in alerts:
-        _show_popup(f'Mini SOC: {alert["severity"]}', alert['description'][:200])
+        _show_popup(f'Mini SOC: {alert.get("severity", "ALERT")}',
+                    (alert.get('description') or '')[:200])
 
 
 def main() -> None:
     last_seen = _load_last_seen_id()
-    print(f'[*] Mini SOC notifier watching {_dashboard_url()} (resuming from id {last_seen})')
+    if last_seen is None:
+        # since_id=-1 asks the server for its current high-water mark only, so
+        # a first run starts from now instead of replaying the whole history.
+        last_seen = -1
+    print(f'[*] Mini SOC notifier watching {_dashboard_url()} '
+          f'({"starting from new alerts" if last_seen < 0 else f"resuming from id {last_seen}"})')
 
     consecutive_failures = 0
     while True:

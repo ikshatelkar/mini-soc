@@ -70,7 +70,7 @@ def send_immediate(alert) -> bool:
         f'Severity: {alert.severity}\n'
         f'Rule: {alert.rule_id or "n/a"}\n'
         f'ATT&CK technique: {alert.technique or "n/a"}\n'
-        f'Source{origin}\n'
+        f'Host: {alert.host}{origin}\n'
         f'Time: {db.utc_iso(alert.timestamp)}\n\n'
         f'This was sent immediately because it is severity {alert.severity} or '
         f'higher, which closes the gap for when you are not at the machine to '
@@ -104,7 +104,8 @@ def _format_digest(alerts: list[dict], window_start: str, window_end: str) -> tu
     ]
     for a in alerts:
         origin = f' from {a["source_ip"]}' if a.get('source_ip') else ''
-        count = f' (x{a["occurrence_count"]})' if a.get('occurrence_count', 1) > 1 else ''
+        occurrences = a.get('occurrence_count') or 1
+        count = f' (x{occurrences})' if occurrences > 1 else ''
         lines.append(f'[{a["severity"]}] {a["description"]}{origin}{count}')
     lines.append('')
     lines.append('Open the dashboard for full detail and to mark these handled.')
@@ -130,7 +131,10 @@ def send_digest_if_due(conn) -> bool:
         return False
 
     c = conn.cursor()
-    c.execute('SELECT * FROM alerts WHERE last_seen >= ? ORDER BY severity, last_seen DESC',
+    # Worst first. A plain ORDER BY severity sorts alphabetically
+    # (CRITICAL, HIGH, INFO, LOW, MEDIUM), burying MEDIUM under INFO noise.
+    c.execute(f'SELECT * FROM alerts WHERE last_seen >= ? '
+              f'ORDER BY {db._severity_rank_expr("severity")} DESC, last_seen DESC',
               (last_sent_iso,))
     alerts = [dict(r) for r in c.fetchall()]
 

@@ -35,8 +35,22 @@ def _watched_directories() -> list[str]:
 
 
 def _is_ignored(filename: str) -> bool:
-    return any(fnmatch.fnmatch(filename, pattern)
+    # Case-insensitive: Windows filenames are, so 'THUMBS.DB' and 'x.TMP' are
+    # the same files the patterns were written for.
+    lowered = filename.lower()
+    return any(fnmatch.fnmatch(lowered, pattern.lower())
                for pattern in getattr(config, 'FIM_IGNORE_PATTERNS', []))
+
+
+def _baseline_checkpoint(directory: str) -> str:
+    return f'fim_baseline:{os.path.normcase(os.path.abspath(directory))}'
+
+
+def _like_prefix(prefix: str) -> str:
+    """A LIKE pattern matching paths under `prefix` literally - '_' and '%'
+    are wildcards in LIKE, and '_' is common in directory names."""
+    escaped = prefix.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    return escaped + '%'
 
 
 def get_file_hash(filepath: str) -> str | None:
@@ -76,22 +90,35 @@ def scan_directory(conn, directory: str) -> None:
 
     c = conn.cursor()
     prefix = os.path.join(directory, '')
-    c.execute('SELECT file_path, file_hash FROM fim_baselines WHERE file_path LIKE ?',
-              (prefix + '%',))
-    baselines = {row['file_path']: row['file_hash'] for row in c.fetchall()}
+    c.execute("SELECT file_path, file_hash FROM fim_baselines WHERE file_path LIKE ? ESCAPE '\\'",
+              (_like_prefix(prefix),))
+    # LIKE is case-insensitive for ASCII, so re-check the prefix exactly.
+    baselines = {row['file_path']: row['file_hash'] for row in c.fetchall()
+                 if row['file_path'].startswith(prefix)}
 
     current = _snapshot(directory)
 
     # First sight of a directory establishes the baseline silently. Without this,
     # installing the tool would alert once per pre-existing file - hundreds of
     # meaningless "file created" alerts that teach an operator to ignore the tool.
-    if not baselines:
+    #
+    # "First sight" is recorded explicitly as a checkpoint rather than inferred
+    # from "no baseline rows yet": a directory that starts out empty (or is
+    # emptied later) also has no rows, and inferring would silently absorb the
+    # next file dropped into it - exactly the event worth alerting on.
+    # Existing installs that predate the checkpoint count as established if
+    # they already have rows.
+    checkpoint = _baseline_checkpoint(directory)
+    if not baselines and db.load_checkpoint(conn, checkpoint) is None:
         for path, file_hash in current.items():
             c.execute('INSERT OR REPLACE INTO fim_baselines (file_path, file_hash) VALUES (?, ?)',
                       (path, file_hash))
         conn.commit()
+        db.save_checkpoint(conn, checkpoint, db.utc_iso())
         print(f'[*] FIM baseline established for {directory} ({len(current)} files)')
         return
+    if db.load_checkpoint(conn, checkpoint) is None:
+        db.save_checkpoint(conn, checkpoint, db.utc_iso())
 
     for path, file_hash in current.items():
         if path not in baselines:
@@ -114,14 +141,17 @@ def scan_directory(conn, directory: str) -> None:
 
 def get_monitoring_scope() -> list[dict]:
     """What the FIM is actually watching, for display on the dashboard."""
+    # Counts files without hashing them - this runs on every /api/health poll
+    # (every 3s per open dashboard), and re-hashing the whole watched tree that
+    # often is pure wasted I/O.
     scope = []
     for directory in _watched_directories():
         exists = os.path.isdir(directory)
-        scope.append({
-            'path': directory,
-            'exists': exists,
-            'file_count': len(_snapshot(directory)) if exists else 0,
-        })
+        count = 0
+        if exists:
+            for _root, _dirs, files in os.walk(directory):
+                count += sum(1 for name in files if not _is_ignored(name))
+        scope.append({'path': directory, 'exists': exists, 'file_count': count})
     return scope
 
 

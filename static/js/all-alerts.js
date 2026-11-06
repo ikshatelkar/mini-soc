@@ -14,11 +14,12 @@ function currentFilters() {
     };
     const since = document.getElementById('filter-since').value;
     const until = document.getElementById('filter-until').value;
-    // Dates come from <input type="date"> as a bare day (YYYY-MM-DD); widen
-    // to a full-day range so "until" includes that day's events instead of
-    // excluding everything after midnight.
-    if (since) filters.since = `${since}T00:00:00`;
-    if (until) filters.until = `${until}T23:59:59`;
+    // Dates come from <input type="date"> as a bare day (YYYY-MM-DD) in the
+    // viewer's local calendar. Widen to that local day's full range and send
+    // it as a UTC instant - alerts are stored in UTC, so sending the bare
+    // local time would shift the filter by the viewer's UTC offset.
+    if (since) filters.since = new Date(`${since}T00:00:00`).toISOString();
+    if (until) filters.until = new Date(`${until}T23:59:59.999`).toISOString();
     return filters;
 }
 
@@ -38,6 +39,13 @@ async function fetchAllAlerts() {
         const response = await fetch(`/api/alerts/all?${qs}`);
         if (redirectIfUnauthorized(response)) return;
         const data = await response.json();
+        if (!response.ok) {
+            // Don't leave the previous results on screen looking current.
+            renderAlertTable(document.getElementById('all-alerts-table-body'), [],
+                `Could not load alerts: ${data.error || `HTTP ${response.status}`}`);
+            document.getElementById('pagination-summary').textContent = '';
+            return;
+        }
         currentPage.total = data.total;
         renderAlertTable(document.getElementById('all-alerts-table-body'), data.alerts,
             'No alerts match these filters.');

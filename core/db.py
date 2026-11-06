@@ -16,14 +16,17 @@ Two rules hold this together:
    the enrichment worker.
 """
 
+import csv
 import hashlib
+import io
 import json
 import os
 import secrets
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from core.events import Alert, HOSTNAME, SEVERITY_ORDER  # type: ignore
+from core.events import Alert, HOSTNAME, SEVERITY_ORDER, severity_rank  # type: ignore
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'mini_soc.db')
 
@@ -79,6 +82,49 @@ def get_connection() -> sqlite3.Connection:
     conn.execute('PRAGMA synchronous=NORMAL')
     conn.execute('PRAGMA foreign_keys=ON')
     return conn
+
+
+@contextmanager
+def connection():
+    """A short-lived connection that is always closed, and rolled back if the
+    body raises.
+
+    Closing on the error path matters more than it looks: Python's sqlite3
+    opens a transaction before the first write, so a connection abandoned
+    after a failed INSERT/UPDATE (a duplicate agent name, an unknown alert id)
+    keeps holding the database write lock until garbage collection gets to it -
+    and meanwhile the alert writer thread times out with 'database is locked'.
+    """
+    conn = get_connection()
+    try:
+        yield conn
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def parse_iso_utc(value: str) -> str:
+    """Normalize a user-supplied ISO datetime to the stored utc_iso() format.
+
+    Stored timestamps are compared as strings, so a filter value has to be in
+    exactly the same shape ('T' separator, '+00:00' offset) or the comparison
+    silently misorders - '...Z' and '...+00:00' do not sort together. Naive
+    values are taken as UTC. Raises ValueError on anything unparseable.
+    """
+    text = value.strip()
+    if text.endswith(('Z', 'z')):
+        # JavaScript's toISOString() form; fromisoformat only accepts 'Z'
+        # from Python 3.11 on.
+        text = text[:-1] + '+00:00'
+    return utc_iso(datetime.fromisoformat(text))
+
+
+def _severity_rank_expr(expr: str) -> str:
+    """SQL expression ranking a severity, higher = worse (unknown = 0)."""
+    return (f"CASE {expr} WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4 WHEN 'MEDIUM' THEN 3 "
+            f"WHEN 'LOW' THEN 2 WHEN 'INFO' THEN 1 ELSE 0 END")
 
 
 def init_db() -> None:
@@ -240,7 +286,7 @@ def insert_or_aggregate(conn: sqlite3.Connection, alert: Alert,
     cutoff_iso = utc_iso(now - timedelta(seconds=dedup_window_seconds))
 
     c.execute(
-        'SELECT id FROM alerts WHERE fingerprint = ? AND last_seen >= ? '
+        'SELECT id, severity FROM alerts WHERE fingerprint = ? AND last_seen >= ? '
         'ORDER BY last_seen DESC LIMIT 1',
         (fingerprint, cutoff_iso),
     )
@@ -250,15 +296,28 @@ def insert_or_aggregate(conn: sqlite3.Connection, alert: Alert,
         # bumping the count on a row someone dismissed would hide that the same
         # condition is still happening - the honest behavior is to put it back
         # in front of them.
+        #
+        # Severity only ever escalates: a recurrence that is worse than the
+        # original (an RDP logon that is now off-hours, a listener that is now
+        # network-exposed) must not stay filed under the milder severity, or it
+        # never reaches Needs Attention. A milder recurrence leaves it alone.
         c.execute(
-            "UPDATE alerts SET occurrence_count = occurrence_count + 1, "
+            "UPDATE alerts SET occurrence_count = COALESCE(occurrence_count, 1) + 1, "
             "last_seen = ?, description = ?, "
-            "status = CASE WHEN status != 'open' THEN 'open' ELSE status END, "
-            "resolved_at = CASE WHEN status != 'open' THEN NULL ELSE resolved_at END "
+            f"severity = CASE WHEN {_severity_rank_expr('?')} > {_severity_rank_expr('severity')} "
+            "THEN ? ELSE severity END, "
+            "status = 'open', "
+            "resolved_at = CASE WHEN status != 'open' THEN NULL ELSE resolved_at END, "
+            "resolution_note = CASE WHEN status != 'open' THEN NULL ELSE resolution_note END "
             "WHERE id = ?",
-            (now_iso, alert.description, row['id']),
+            (now_iso, alert.description, alert.severity, alert.severity, row['id']),
         )
         conn.commit()
+        # 'escalated' tells the pipeline this recurrence is worse than what was
+        # already reported, so it deserves a fresh notification - unlike a
+        # plain recurrence, which stays silent.
+        if severity_rank(alert.severity) > severity_rank(row['severity']):
+            return 'escalated', row['id']
         return 'aggregated', row['id']
 
     # Resolve geolocation from cache if we already know this IP, so the common
@@ -303,7 +362,10 @@ def prune_old_alerts(conn: sqlite3.Connection, retention_days: int,
     oldest-first. Returns how many rows were removed."""
     c = conn.cursor()
     cutoff = utc_iso(datetime.now(timezone.utc) - timedelta(days=retention_days))
-    c.execute('DELETE FROM alerts WHERE timestamp < ?', (cutoff,))
+    # Aged out by last activity, not first sighting: a condition first seen
+    # 40 days ago that is still recurring today is live, and deleting it would
+    # throw away its history and lifecycle state.
+    c.execute('DELETE FROM alerts WHERE COALESCE(last_seen, timestamp) < ?', (cutoff,))
     removed = c.rowcount or 0
 
     c.execute('SELECT COUNT(*) FROM alerts')
@@ -311,7 +373,7 @@ def prune_old_alerts(conn: sqlite3.Connection, retention_days: int,
     if total > max_alerts:
         c.execute(
             'DELETE FROM alerts WHERE id IN ('
-            '  SELECT id FROM alerts ORDER BY timestamp ASC LIMIT ?'
+            '  SELECT id FROM alerts ORDER BY COALESCE(last_seen, timestamp) ASC LIMIT ?'
             ')',
             (total - max_alerts,),
         )
@@ -352,6 +414,7 @@ def set_alert_status(conn: sqlite3.Connection, alert_id: int, status: str,
         (status, resolved_at, note, alert_id),
     )
     if c.rowcount == 0:
+        conn.rollback()
         raise AlertNotFoundError(f'no alert with id {alert_id}')
     conn.commit()
 
@@ -379,13 +442,8 @@ def bulk_set_status(conn: sqlite3.Connection, status: str, *, module: str | None
     if max_severity:
         # Ordered as stored severities compare lexically wrong (HIGH < LOW), so
         # this uses an explicit CASE rank rather than a string comparison.
-        clauses.append('''
-            CASE severity WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
-                          WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END
-            <= CASE ? WHEN 'CRITICAL' THEN 5 WHEN 'HIGH' THEN 4
-                      WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 2 ELSE 1 END
-        ''')
-        params.append(max_severity)
+        clauses.append(f"{_severity_rank_expr('severity')} <= {_severity_rank_expr('?')}")
+        params.append(max_severity.upper())
 
     resolved_at = utc_iso()
     c.execute(
@@ -477,37 +535,46 @@ def load_checkpoint(conn: sqlite3.Connection, name: str) -> str | None:
 
 def admin_exists() -> bool:
     """Whether the one-time /setup flow has already created an account."""
-    conn = get_connection()
-    row = conn.execute('SELECT 1 FROM admin_users LIMIT 1').fetchone()
-    conn.close()
+    with connection() as conn:
+        row = conn.execute('SELECT 1 FROM admin_users LIMIT 1').fetchone()
     return row is not None
 
 
+class AdminAlreadyExistsError(RuntimeError):
+    pass
+
+
 def create_admin_user(username: str, password_hash: str) -> None:
-    conn = get_connection()
-    conn.execute(
-        'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
-        (username, password_hash),
-    )
-    conn.commit()
-    conn.close()
+    """Create the single admin account.
+
+    The "no admin yet" check is part of the INSERT itself rather than a
+    separate admin_exists() call beforehand, so two /setup submissions racing
+    each other cannot both succeed and leave two admin accounts behind.
+    """
+    with connection() as conn:
+        cur = conn.execute(
+            'INSERT INTO admin_users (username, password_hash) '
+            'SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM admin_users)',
+            (username, password_hash),
+        )
+        if cur.rowcount != 1:
+            raise AdminAlreadyExistsError('an admin account already exists')
+        conn.commit()
 
 
 def get_admin_user(username: str) -> dict | None:
-    conn = get_connection()
-    row = conn.execute(
-        'SELECT * FROM admin_users WHERE username = ?', (username,),
-    ).fetchone()
-    conn.close()
+    with connection() as conn:
+        row = conn.execute(
+            'SELECT * FROM admin_users WHERE username = ?', (username,),
+        ).fetchone()
     return dict(row) if row else None
 
 
 def get_admin_user_by_id(admin_id: int) -> dict | None:
-    conn = get_connection()
-    row = conn.execute(
-        'SELECT * FROM admin_users WHERE id = ?', (admin_id,),
-    ).fetchone()
-    conn.close()
+    with connection() as conn:
+        row = conn.execute(
+            'SELECT * FROM admin_users WHERE id = ?', (admin_id,),
+        ).fetchone()
     return dict(row) if row else None
 
 
@@ -515,10 +582,9 @@ def set_admin_session_token(admin_id: int, token: str | None) -> None:
     """Stamp the one currently-valid session token for this admin (or clear it
     on logout). See core/auth.py for how this enforces a single active
     session."""
-    conn = get_connection()
-    conn.execute('UPDATE admin_users SET session_token = ? WHERE id = ?', (token, admin_id))
-    conn.commit()
-    conn.close()
+    with connection() as conn:
+        conn.execute('UPDATE admin_users SET session_token = ? WHERE id = ?', (token, admin_id))
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -533,49 +599,47 @@ def create_agent(name: str) -> tuple[int, str]:
     """Enroll a new agent. Returns (agent_id, plaintext_token) - the token is
     shown to the admin exactly once here; only its hash is ever persisted."""
     token = secrets.token_hex(32)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute(
-        'INSERT INTO agents (name, token_hash) VALUES (?, ?)',
-        (name, _hash_token(token)),
-    )
-    agent_id = c.lastrowid
-    conn.commit()
-    conn.close()
+    with connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            'INSERT INTO agents (name, token_hash) VALUES (?, ?)',
+            (name, _hash_token(token)),
+        )
+        agent_id = c.lastrowid
+        conn.commit()
     return agent_id, token
 
 
 def get_agent_by_token(token: str) -> dict | None:
-    conn = get_connection()
-    row = conn.execute(
-        'SELECT * FROM agents WHERE token_hash = ?', (_hash_token(token),),
-    ).fetchone()
-    conn.close()
+    with connection() as conn:
+        row = conn.execute(
+            'SELECT * FROM agents WHERE token_hash = ?', (_hash_token(token),),
+        ).fetchone()
     return dict(row) if row else None
 
 
 def touch_agent_last_seen(agent_id: int) -> None:
-    conn = get_connection()
-    conn.execute('UPDATE agents SET last_seen = ? WHERE id = ?', (utc_iso(), agent_id))
-    conn.commit()
-    conn.close()
+    with connection() as conn:
+        conn.execute('UPDATE agents SET last_seen = ? WHERE id = ?', (utc_iso(), agent_id))
+        conn.commit()
 
 
 def list_agents() -> list[dict]:
-    conn = get_connection()
-    rows = [dict(r) for r in conn.execute('SELECT * FROM agents ORDER BY enrolled_at DESC')]
-    conn.close()
+    with connection() as conn:
+        # id as tiebreaker: enrolled_at has one-second resolution, so agents
+        # enrolled together would otherwise come back in arbitrary order.
+        rows = [dict(r) for r in conn.execute(
+            'SELECT * FROM agents ORDER BY enrolled_at DESC, id DESC')]
     return rows
 
 
 def delete_agent(agent_id: int) -> bool:
     """Revoke an agent's access. Returns False if no such agent existed."""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('DELETE FROM agents WHERE id = ?', (agent_id,))
-    removed = c.rowcount > 0
-    conn.commit()
-    conn.close()
+    with connection() as conn:
+        c = conn.cursor()
+        c.execute('DELETE FROM agents WHERE id = ?', (agent_id,))
+        removed = c.rowcount > 0
+        conn.commit()
     return removed
 
 
@@ -719,7 +783,12 @@ def get_all_alerts(*, severity: str | None = None, module: str | None = None,
     compared against last_seen. `host` backs the Employees page's per-computer
     alert list. Returns the page plus a total count so the frontend can
     render pagination without a second round trip.
+
+    Raises ValueError if `since`/`until` is not a parseable ISO datetime.
     """
+    since = parse_iso_utc(since) if since else None
+    until = parse_iso_utc(until) if until else None
+
     conn = get_connection()
     c = conn.cursor()
     where: list[str] = []
@@ -743,8 +812,11 @@ def get_all_alerts(*, severity: str | None = None, module: str | None = None,
         where.append('last_seen <= ?')
         params.append(until)
     if search:
-        where.append('(description LIKE ? OR source_ip LIKE ?)')
-        like = f'%{search}%'
+        # Escaped so '%' and '_' typed into the search box match literally
+        # instead of acting as wildcards.
+        where.append("(description LIKE ? ESCAPE '\\' OR source_ip LIKE ? ESCAPE '\\')")
+        escaped = search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        like = f'%{escaped}%'
         params.extend([like, like])
     clause = f"WHERE {' AND '.join(where)}" if where else ''
 
@@ -889,35 +961,50 @@ def get_geomap_points(limit: int = 200) -> list[dict]:
     return rows
 
 
-def export_alerts_to_csv() -> str:
-    """Export alerts to CSV.
+_CSV_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+
+
+def _csv_safe(value):
+    """Neutralize spreadsheet formula injection.
+
+    Alert descriptions and raw payloads embed attacker-controlled text - the
+    username in a failed SSH login, a scheduled task name. Opened in Excel, a
+    cell starting with '=' (or + - @) is executed as a formula, which is a
+    known way to exfiltrate data or run commands on the analyst's machine.
+    Prefixing a quote makes the spreadsheet treat it as plain text.
+    """
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def export_alerts_csv() -> str:
+    """Export every alert as CSV text.
 
     Columns are named explicitly and the header is generated from the cursor
     description, so adding a column to the schema can no longer shift the data
-    out from under the headers.
+    out from under the headers. Built in memory rather than written to a fixed
+    file next to the code, so two exports at once can't interleave and no copy
+    of the alert history is left lying around on disk.
     """
-    import csv
+    with connection() as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, timestamp, last_seen, occurrence_count, host, module,
+                   alert_type, severity, description, source_ip, rule_id, technique,
+                   entities, raw, geo_country, geo_city, geo_isp, geo_lat, geo_lon,
+                   status, resolved_at, resolution_note
+            FROM alerts ORDER BY timestamp DESC
+        ''')
+        headers = [d[0] for d in c.description]
+        rows = c.fetchall()
 
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        SELECT id, timestamp, last_seen, occurrence_count, host, module,
-               alert_type, severity, description, source_ip, rule_id, technique,
-               entities, raw, geo_country, geo_city, geo_isp, geo_lat, geo_lon,
-               status, resolved_at, resolution_note
-        FROM alerts ORDER BY timestamp DESC
-    ''')
-    headers = [d[0] for d in c.description]
-    rows = c.fetchall()
-
-    export_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'alerts_export.csv')
-    with open(export_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(headers)
-        writer.writerows(rows)
-
-    conn.close()
-    return export_path
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(headers)
+    for row in rows:
+        writer.writerow([_csv_safe(v) for v in row])
+    return buffer.getvalue()
 
 
 if __name__ == '__main__':

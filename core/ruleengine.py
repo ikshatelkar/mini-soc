@@ -259,9 +259,12 @@ class Rule:
             raise RuleError('rule must be a mapping')
 
         self.origin = origin
-        self.id = spec.get('id')
-        if not self.id:
+        raw_id = spec.get('id')
+        if raw_id is None or str(raw_id).strip() == '':
             raise RuleError("rule needs an 'id'")
+        # YAML turns `id: 1001` into an int; everything downstream (exception
+        # globs, the alerts table) expects text.
+        self.id = str(raw_id).strip()
 
         self.title = spec.get('title') or self.id
         self.enabled = bool(spec.get('enabled', True))
@@ -381,10 +384,19 @@ class Rule:
             return _as_text(value) if value is not _MISSING else f'<{token}?>'
         return _TEMPLATE_TOKEN.sub(replace, template)
 
-    def build_entities(self, event: dict) -> dict:
+    def build_entities(self, event: dict, extra: dict | None = None) -> dict:
+        """Resolve the rule's entity mapping. A mapping may name a correlation
+        value (match_count, distinct_count) as well as an event field - the
+        shipped rules do (`failure_count: match_count`), the same way message
+        templates can."""
+        extra = extra or {}
         entities = {}
         for name, field in self.entities_spec.items():
-            value = resolve_field(event, str(field))
+            field = str(field)
+            if field in extra:
+                entities[name] = extra[field]
+                continue
+            value = resolve_field(event, field)
             if value is not _MISSING and value is not None:
                 entities[name] = value
         return entities
@@ -429,8 +441,11 @@ class GlobalException:
             raise RuleError('exception must be a mapping')
         self.comment = spec.get('comment') or '(no comment)'
         self.rule_ids = spec.get('rules') or []
-        if isinstance(self.rule_ids, str):
+        if isinstance(self.rule_ids, (str, int)):
             self.rule_ids = [self.rule_ids]
+        if not isinstance(self.rule_ids, list):
+            raise RuleError("exception 'rules' must be a list of rule ids")
+        self.rule_ids = [str(r) for r in self.rule_ids]
         self.conditions = _build_conditions(spec.get('conditions'), 'exception.conditions')
         if not self.conditions:
             raise RuleError('exception needs at least one condition')
@@ -470,32 +485,44 @@ class RuleEngine:
 
     def set_rules(self, rules: list[Rule], exceptions: list[GlobalException],
                   errors: list[dict] | None = None) -> None:
+        # Build the new index completely, then swap references. Clearing and
+        # refilling the live dict in place would let an event processed during
+        # a /api/rules/reload see no rules at all for its source.
+        by_source: dict[str, list[Rule]] = defaultdict(list)
+        for rule in rules:
+            by_source[rule.source].append(rule)
         self.rules = rules
         self.exceptions = exceptions
         self.load_errors = errors or []
-        self._by_source.clear()
-        for rule in rules:
-            self._by_source[rule.source].append(rule)
+        self._by_source = by_source
 
     def process(self, event: dict) -> int:
         """Evaluate every rule for one event. Returns the number of alerts fired."""
         self.events_processed += 1
-        now = event.get('time') or datetime.now(timezone.utc)
+        now = event.get('time')
+        if not isinstance(now, datetime):
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            # Correlation windows compare against aware datetimes; a naive one
+            # would raise TypeError and silently kill evaluation of the event.
+            now = now.replace(tzinfo=timezone.utc)
         self._correlator.sweep(now, timedelta(seconds=3600))
 
+        exceptions = self.exceptions
         fired = 0
         for rule in self._by_source.get(event.get('source'), ()):
             if not rule.enabled:
                 continue
             try:
-                if self._evaluate(rule, event, now):
+                if self._evaluate(rule, event, now, exceptions):
                     fired += 1
             except Exception as exc:
                 # A broken rule must not stop the others or the collector.
                 print(f'[!] Rule "{rule.id}" raised during evaluation: {exc}')
         return fired
 
-    def _evaluate(self, rule: Rule, event: dict, now: datetime) -> bool:
+    def _evaluate(self, rule: Rule, event: dict, now: datetime,
+                  exceptions: list[GlobalException]) -> bool:
         if not rule.matches_identity(event):
             return False
 
@@ -505,7 +532,7 @@ class RuleEngine:
             rule.suppressed += 1
             return False
 
-        for exception in self.exceptions:
+        for exception in exceptions:
             if exception.applies_to(rule) and exception.matches(event):
                 exception.hits += 1
                 rule.suppressed += 1
@@ -542,7 +569,7 @@ class RuleEngine:
 
         severity = rule.resolve_severity(event)
         message = rule.render(rule.message, event, extra)
-        entities = rule.build_entities(event)
+        entities = rule.build_entities(event, extra)
         entities.update({k: v for k, v in extra.items() if k != 'match_count'
                          or rule.correlation_type != 'single'})
 

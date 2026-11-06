@@ -89,17 +89,24 @@ WINEVT_CHANNELS = [
         'channel': 'Security',
         'enabled': True,
         'required': True,
-        # 4625 failed logon, 4624 success, 4672 admin session, 4720/4726 account
-        # created/deleted, 4732/4728 group membership, 1102 audit log cleared,
-        # 4698 scheduled task created.
-        'event_ids': [4625, 4624, 4672, 4720, 4726, 4732, 4728, 1102, 4698],
+        # 4625 failed logon, 4624 success, 4672 admin session, 4648 explicit
+        # credentials, 4720/4726 account created/deleted, 4722 account enabled,
+        # 4724 password reset, 4732/4728/4756 group membership, 1102 audit log
+        # cleared, 4719 audit policy changed, 4698 scheduled task created.
+        #
+        # Every event ID a rule in rules/windows_*.yaml matches on must be
+        # listed here - an ID that is never subscribed to is a rule that can
+        # never fire. tests/test_ruleengine.py enforces this.
+        'event_ids': [4625, 4624, 4672, 4648, 4720, 4726, 4722, 4724,
+                      4732, 4728, 4756, 1102, 4719, 4698],
     },
     {
         'channel': 'System',
         'enabled': True,
         'required': True,
-        # 7045 service installed, 7040 start type changed, 104 event log cleared.
-        'event_ids': [7045, 7040, 104],
+        # 7045 service installed, 7040 start type changed, 7034 service
+        # crashed, 104 event log cleared.
+        'event_ids': [7045, 7040, 7034, 104],
     },
     {
         # Only exists if Sysmon is installed. Marked not-required so its absence

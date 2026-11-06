@@ -91,6 +91,19 @@ def parse_event_xml(xml_text: str) -> dict:
     for index, node in enumerate(root.findall('./e:EventData/e:Data', EVENT_NS)):
         data[node.get('Name') or f'_{index}'] = node.text
 
+    # Some events carry their fields under UserData instead of EventData, in a
+    # provider-specific namespace - notably 1102 (Security log cleared) and
+    # 104 (System log cleared), whose SubjectUserName is the whole point of
+    # the alert. Flatten its leaf elements by local name so rules can address
+    # them as data.<Name> just like EventData fields. EventData wins on a clash.
+    user_data = root.find('./e:UserData', EVENT_NS)
+    if user_data is not None:
+        for node in user_data.iter():
+            if node is user_data or len(node):
+                continue
+            name = node.tag.rsplit('}', 1)[-1]
+            data.setdefault(name, node.text)
+
     event_id_text = system_text('EventID') or '0'
     record_id_text = system_text('EventRecordID') or '0'
 
@@ -174,7 +187,20 @@ class ChannelCollector:
             saved = db.load_checkpoint(conn, self._checkpoint_name)
 
             try:
-                subscription, bookmark = self._subscribe(saved)
+                try:
+                    subscription, bookmark = self._subscribe(saved)
+                except Exception as exc:
+                    # A saved bookmark can go stale (the log was cleared or
+                    # rolled over past it). Rather than leaving the channel
+                    # dark forever, fall back to new events - unless the
+                    # failure is about the channel itself, which a fresh
+                    # subscription would hit too.
+                    if not saved or self._classify_error(exc)[0] in ('access_denied', 'not_available'):
+                        raise
+                    print(f'[!] Saved checkpoint for {self.channel} rejected ({exc}) - '
+                          f'resuming from new events instead')
+                    saved = None
+                    subscription, bookmark = self._subscribe(None)
             except Exception as exc:
                 self.status, self.detail = self._classify_error(exc)
                 level = '!' if self.required else '*'

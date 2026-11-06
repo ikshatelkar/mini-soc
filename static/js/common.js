@@ -126,10 +126,17 @@ function relativeTime(isoString) {
     return new Date(isoString).toLocaleDateString();
 }
 
+// Escapes for both element content AND attribute values. The textContent/
+// innerHTML trick alone leaves quotes untouched, so a value placed inside
+// title="..." or value="..." could break out of the attribute.
+const _HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str ?? '';
-    return div.innerHTML;
+    return String(str ?? '').replace(/[&<>"']/g, ch => _HTML_ESCAPES[ch]);
+}
+
+// Severity/status values end up in class names; only let known tokens through.
+function cssToken(value) {
+    return String(value ?? '').replace(/[^A-Za-z0-9_-]/g, '');
 }
 
 // ---------------------------------------------------------------------------
@@ -145,8 +152,13 @@ function setAlertsChangedHandler(fn) { _onAlertsChanged = fn; }
 
 async function postAction(path) {
     try {
-        const response = await apiFetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+        const response = await apiFetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+        });
         if (redirectIfUnauthorized(response)) return;
+        if (!response.ok) console.error(`Action ${path} failed: HTTP ${response.status}`);
         await _onAlertsChanged();
     } catch (err) {
         console.error('Action failed:', err);
@@ -159,37 +171,46 @@ function reopenAlert(id) { postAction(`/api/alerts/${id}/reopen`); }
 
 function statusBadge(status) {
     const label = { open: 'Open', acknowledged: 'Handled', dismissed: 'Dismissed' }[status] || status;
-    return `<span class="status-badge ${status}">${label}</span>`;
+    return `<span class="status-badge ${cssToken(status)}">${escapeHtml(label)}</span>`;
 }
 
 function rowActions(alert) {
+    const id = Number(alert.id);
     if (alert.status === 'open') {
         return `<div class="row-actions">
-            <button type="button" onclick="acknowledgeAlert(${alert.id})">Handle</button>
-            <button type="button" onclick="dismissAlert(${alert.id})">Dismiss</button>
+            <button type="button" onclick="acknowledgeAlert(${id})">Handle</button>
+            <button type="button" onclick="dismissAlert(${id})">Dismiss</button>
         </div>`;
     }
-    return `<div class="row-actions"><button type="button" onclick="reopenAlert(${alert.id})">Reopen</button></div>`;
+    return `<div class="row-actions"><button type="button" onclick="reopenAlert(${id})">Reopen</button></div>`;
+}
+
+// "City, Country" from geo enrichment, else the raw source IP. Every part of
+// this comes from outside (the geolocation provider, a log line), so it is
+// always escaped by the callers.
+function alertOrigin(a, fallback) {
+    return a.geo_country ? `${a.geo_city}, ${a.geo_country}` : (a.source_ip || fallback);
 }
 
 // Renders one alert as a table row matching the shared .soc-table markup -
 // used by both the dashboard's Activity Log and the All Alerts page so the
 // two never drift out of sync visually.
 function alertRowHtml(a) {
-    const origin = a.geo_country ? `${a.geo_city}, ${a.geo_country}` : (a.source_ip || 'This device');
-    const technique = a.technique ? `<span class="technique-badge">${a.technique}</span>` : '';
-    const ruleTag = a.rule_id ? `<div class="rule-tag">${a.rule_id}</div>` : '';
-    const countBadge = a.occurrence_count > 1
-        ? `<span class="count-badge repeat">×${a.occurrence_count}</span>` : '';
+    const origin = alertOrigin(a, 'This device');
+    const technique = a.technique ? `<span class="technique-badge">${escapeHtml(a.technique)}</span>` : '';
+    const ruleTag = a.rule_id ? `<div class="rule-tag">${escapeHtml(a.rule_id)}</div>` : '';
+    const count = Number(a.occurrence_count) || 1;
+    const countBadge = count > 1 ? `<span class="count-badge repeat">×${count}</span>` : '';
+    const when = a.last_seen || a.timestamp;
 
     return `
-        <td class="mono" style="color: var(--text-muted); white-space: nowrap;" title="${a.last_seen || a.timestamp}">${relativeTime(a.last_seen || a.timestamp)}</td>
-        <td class="advanced-only"><strong>${moduleLabel(a.module)}</strong>${ruleTag}</td>
-        <td><span class="severity-chip ${a.severity}">${SEVERITY_ICON[a.severity] || ''} ${a.severity}</span></td>
+        <td class="mono" style="color: var(--text-muted); white-space: nowrap;" title="${escapeHtml(when)}">${escapeHtml(relativeTime(when))}</td>
+        <td class="advanced-only"><strong>${escapeHtml(moduleLabel(a.module))}</strong>${ruleTag}</td>
+        <td><span class="severity-chip ${cssToken(a.severity)}">${SEVERITY_ICON[a.severity] || ''} ${escapeHtml(a.severity)}</span></td>
         <td>${escapeHtml(a.description)} ${countBadge}</td>
         <td class="advanced-only">${technique}</td>
         <td>${statusBadge(a.status || 'open')}</td>
-        <td style="font-size: 0.85em">${origin}<div class="advanced-only" style="color:var(--text-muted); font-size:0.85em">${a.geo_isp || ''}</div></td>
+        <td style="font-size: 0.85em">${escapeHtml(origin)}<div class="advanced-only" style="color:var(--text-muted); font-size:0.85em">${escapeHtml(a.geo_isp || '')}</div></td>
         <td>${rowActions(a)}</td>
     `;
 }
@@ -197,7 +218,7 @@ function alertRowHtml(a) {
 function renderAlertTable(tbody, alerts, emptyMessage) {
     tbody.innerHTML = '';
     if (!alerts || alerts.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="empty-note">${emptyMessage || 'Nothing here.'}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="empty-note">${escapeHtml(emptyMessage || 'Nothing here.')}</td></tr>`;
         return;
     }
     alerts.forEach(a => {
@@ -237,7 +258,9 @@ function renderWorldMap(geoData) {
         mode: 'markers',
         lat: geoData.map(d => d.geo_lat),
         lon: geoData.map(d => d.geo_lon),
-        text: geoData.map(d => `${d.source_ip}<br>${d.geo_city}, ${d.geo_country}<br>${d.geo_isp}<br>Events: ${d.hit_count}`),
+        // Plotly renders a subset of HTML in hover text, and every field here
+        // comes from the external geolocation provider - escape it.
+        text: geoData.map(d => `${escapeHtml(d.source_ip)}<br>${escapeHtml(d.geo_city)}, ${escapeHtml(d.geo_country)}<br>${escapeHtml(d.geo_isp)}<br>Events: ${Number(d.hit_count) || 0}`),
         marker: {
             size: geoData.map(d => Math.log2(d.hit_count + 1) * 8 + 5),
             color: geoData.map(d => severityColor(d.severity)),

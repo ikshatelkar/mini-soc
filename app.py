@@ -3,7 +3,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from flask import (  # type: ignore
-    Flask, jsonify, redirect, render_template, request, send_file, session, url_for,
+    Flask, Response, jsonify, redirect, render_template, request, session, url_for,
 )
 
 import config  # type: ignore
@@ -13,11 +13,12 @@ from core.auth import (  # type: ignore
     verify_login,
 )
 from core.db import (  # type: ignore
-    AlertNotFoundError, admin_exists, bulk_set_status, create_admin_user, create_agent,
-    delete_agent, export_alerts_to_csv, get_agent_by_token, get_all_alerts, get_alert_stats,
-    get_connection, get_employees_overview, get_geomap_points, get_lifecycle_counts,
-    get_needs_attention, get_recent_alerts, init_db, list_agents, set_admin_session_token,
-    set_alert_status, set_employee_name, touch_agent_last_seen,
+    AdminAlreadyExistsError, AlertNotFoundError, admin_exists, bulk_set_status, connection,
+    create_admin_user, create_agent, delete_agent, export_alerts_csv, get_agent_by_token,
+    get_all_alerts, get_alert_stats, get_employees_overview, get_geomap_points,
+    get_lifecycle_counts, get_needs_attention, get_recent_alerts, init_db, list_agents,
+    parse_iso_utc,
+    set_admin_session_token, set_alert_status, set_employee_name, touch_agent_last_seen,
 )
 from core.detect import engine, load_ruleset, process_winevt  # type: ignore
 from core.dummy_log_generator import run_generator  # type: ignore
@@ -71,6 +72,38 @@ def _security_headers(response):
     return response
 
 
+def _json_body() -> dict:
+    """The request's JSON object, or {} for a missing/invalid body or any
+    non-object JSON value (a list, a string) - so handlers can call .get()
+    without a stray payload turning into a 500."""
+    body = request.get_json(silent=True)
+    return body if isinstance(body, dict) else {}
+
+
+def _safe_next(next_path: str | None) -> str | None:
+    """`next_path` if it is a same-site path, else None.
+
+    Starting with a single '/' is not enough on its own: browsers treat
+    '/\\evil.com' like '//evil.com' (protocol-relative, off-site), and strip
+    tabs/newlines before resolving, so '/\\t/evil.com' collapses to
+    '//evil.com' too.
+    """
+    if not next_path or not next_path.startswith('/'):
+        return None
+    if '\\' in next_path or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in next_path):
+        return None
+    if next_path.startswith('//'):
+        return None
+    return next_path
+
+
+def _utc_aware(when: datetime) -> datetime:
+    """Treat a naive datetime as UTC. Mixing naive and aware datetimes raises
+    TypeError on comparison, which is what the correlator and agent-status
+    checks do with these."""
+    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
+
+
 def start_background_services() -> None:
     """Initialize storage and start the pipeline plus all detection modules."""
     print('[*] Initializing Mini SOC Services...')
@@ -114,7 +147,10 @@ def setup():
         elif password != confirm:
             error = 'Passwords do not match.'
         else:
-            create_admin_user(username, hash_password(password))
+            try:
+                create_admin_user(username, hash_password(password))
+            except AdminAlreadyExistsError:
+                pass  # lost a race with another /setup submission - that one wins
             return redirect(url_for('login'))
     return render_template('setup.html', error=error)
 
@@ -153,12 +189,10 @@ def login():
                 # issued by a previous login - this browser or another one -
                 # stops authenticating on its very next request.
                 session['session_token'] = issue_session_token(user['id'])
-                next_path = request.args.get('next', '')
                 # Only ever redirect somewhere inside this app - an unchecked
                 # `next` value could otherwise send a fresh login to an
-                # attacker-controlled URL.
-                dest = next_path if next_path.startswith('/') and not next_path.startswith('//') else url_for('index')
-                return redirect(dest)
+                # attacker-controlled URL. See _safe_next().
+                return redirect(_safe_next(request.args.get('next')) or url_for('index'))
     return render_template('login.html', error=error, notice=notice)
 
 
@@ -237,11 +271,19 @@ def api_alerts_all():
     severity = request.args.get('severity')
     if severity and severity.upper() not in _VALID_SEVERITIES:
         return jsonify({'error': f"invalid severity '{severity}'"}), 400
-    limit = min(request.args.get('limit', 100, type=int), 500)
+    # Clamped on both ends: SQLite treats a negative LIMIT as "no limit", so an
+    # unclamped ?limit=-1 would return the entire table in one response.
+    limit = max(1, min(request.args.get('limit', 100, type=int), 500))
     offset = max(request.args.get('offset', 0, type=int), 0)
+    since, until = request.args.get('since'), request.args.get('until')
+    try:
+        since = parse_iso_utc(since) if since else None
+        until = parse_iso_utc(until) if until else None
+    except ValueError:
+        return jsonify({'error': "'since'/'until' must be ISO 8601 datetimes"}), 400
     return jsonify(get_all_alerts(
         severity=severity, module=request.args.get('module'), status=status,
-        since=request.args.get('since'), until=request.args.get('until'),
+        since=since, until=until,
         search=request.args.get('search'), host=request.args.get('host'),
         limit=limit, offset=offset,
     ))
@@ -254,11 +296,15 @@ def api_employees():
     alert rollup, for the Employees page. POST: assign/clear the employee
     name for one host - see core/db.py's set_employee_name()."""
     if request.method == 'POST':
-        body = request.get_json(silent=True) or {}
-        host = (body.get('host') or '').strip()
-        if not host:
+        body = _json_body()
+        host = body.get('host')
+        employee_name = body.get('employee_name')
+        if not isinstance(host, str) or not host.strip():
             return jsonify({'error': 'host is required'}), 400
-        employee_name = (body.get('employee_name') or '').strip() or None
+        if employee_name is not None and not isinstance(employee_name, str):
+            return jsonify({'error': 'employee_name must be a string'}), 400
+        host = host.strip()
+        employee_name = (employee_name or '').strip() or None
         set_employee_name(host, employee_name)
         return jsonify({'host': host, 'employee_name': employee_name})
     return jsonify(get_employees_overview())
@@ -276,36 +322,33 @@ def api_alerts_needs_attention():
     return jsonify(get_needs_attention())
 
 
+def _change_alert_status(alert_id: int, status: str, note=None):
+    if note is not None and not isinstance(note, str):
+        note = str(note)
+    try:
+        with connection() as conn:
+            return jsonify(set_alert_status(conn, alert_id, status, note=note))
+    except AlertNotFoundError as exc:
+        return jsonify({'error': str(exc)}), 404
+
+
 @app.route('/api/alerts/<int:alert_id>/acknowledge', methods=['POST'])
 @login_required
 def api_alert_acknowledge(alert_id):
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(set_alert_status(get_connection(), alert_id, 'acknowledged',
-                                        note=body.get('note')))
-    except AlertNotFoundError as exc:
-        return jsonify({'error': str(exc)}), 404
+    return _change_alert_status(alert_id, 'acknowledged', _json_body().get('note'))
 
 
 @app.route('/api/alerts/<int:alert_id>/dismiss', methods=['POST'])
 @login_required
 def api_alert_dismiss(alert_id):
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(set_alert_status(get_connection(), alert_id, 'dismissed',
-                                        note=body.get('note')))
-    except AlertNotFoundError as exc:
-        return jsonify({'error': str(exc)}), 404
+    return _change_alert_status(alert_id, 'dismissed', _json_body().get('note'))
 
 
 @app.route('/api/alerts/<int:alert_id>/reopen', methods=['POST'])
 @login_required
 def api_alert_reopen(alert_id):
     """Undo an acknowledge/dismiss - mistakes should be one click to fix."""
-    try:
-        return jsonify(set_alert_status(get_connection(), alert_id, 'open'))
-    except AlertNotFoundError as exc:
-        return jsonify({'error': str(exc)}), 404
+    return _change_alert_status(alert_id, 'open')
 
 
 @app.route('/api/alerts/bulk-resolve', methods=['POST'])
@@ -318,13 +361,21 @@ def api_alerts_bulk_resolve():
     (rules/exceptions.yaml) is still the right fix for a *permanent* false
     positive - this is for clearing a backlog, not replacing that.
     """
-    body = request.get_json(silent=True) or {}
+    body = _json_body()
     status = body.get('status', 'acknowledged')
     if status not in ('acknowledged', 'dismissed'):
         return jsonify({'error': "status must be 'acknowledged' or 'dismissed'"}), 400
-    count = bulk_set_status(get_connection(), status,
-                            module=body.get('module'),
-                            max_severity=body.get('max_severity'))
+    max_severity = body.get('max_severity')
+    # An unrecognised ceiling would silently rank as the lowest severity and
+    # resolve far less than intended - reject it instead.
+    if max_severity is not None and (not isinstance(max_severity, str)
+                                     or max_severity.upper() not in _VALID_SEVERITIES):
+        return jsonify({'error': f'max_severity must be one of {list(_VALID_SEVERITIES)}'}), 400
+    module = body.get('module')
+    if module is not None and not isinstance(module, str):
+        return jsonify({'error': 'module must be a string'}), 400
+    with connection() as conn:
+        count = bulk_set_status(conn, status, module=module, max_severity=max_severity)
     return jsonify({'updated': count, 'status': status})
 
 
@@ -348,15 +399,29 @@ def api_notifications_pending():
     anyone else - the moment the dashboard is ever bound to a LAN interface,
     a remote caller can no longer read alerts through this endpoint.
     """
-    if request.remote_addr != '127.0.0.1' and session.get('admin_id') is None:
+    # "Local" = loopback, or this machine's own configured address: when the
+    # dashboard is bound to one specific LAN IP, the notifier on this machine
+    # has to dial that IP, and the connection then comes *from* that IP.
+    local_addrs = {'127.0.0.1', '::1'}
+    if config.WEB_HOST not in ('0.0.0.0', '::', ''):
+        local_addrs.add(config.WEB_HOST)
+    if request.remote_addr not in local_addrs and session.get('admin_id') is None:
         return jsonify({'error': 'authentication required'}), 401
 
     since_id = request.args.get('since_id', 0, type=int)
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('SELECT * FROM alerts WHERE id > ? ORDER BY id ASC LIMIT 100', (since_id,))
-    rows = [dict(r) for r in c.fetchall()]
-    conn.close()
+    if since_id < 0:
+        # Bootstrap for a notifier with no saved position (first run, or its
+        # state file was lost): hand back only the current high-water mark,
+        # so it starts from "now" instead of replaying the entire alert
+        # history as popups 100 at a time.
+        with connection() as conn:
+            max_id = conn.execute('SELECT COALESCE(MAX(id), 0) FROM alerts').fetchone()[0]
+        return jsonify({'alerts': [], 'max_id': max_id})
+
+    with connection() as conn:
+        c = conn.cursor()
+        c.execute('SELECT * FROM alerts WHERE id > ? ORDER BY id ASC LIMIT 100', (since_id,))
+        rows = [dict(r) for r in c.fetchall()]
 
     pending = [r for r in rows if meets_notification_floor(r['module'], r['severity'])]
     max_id = rows[-1]['id'] if rows else since_id
@@ -436,8 +501,12 @@ def api_rules_reload():
 @app.route('/api/export')
 @login_required
 def api_export():
-    csv_path = export_alerts_to_csv()
-    return send_file(csv_path, as_attachment=True)
+    return Response(
+        export_alerts_csv(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': 'attachment; filename=alerts_export.csv',
+                 'Cache-Control': 'no-store'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +519,10 @@ def _agent_status(agent: dict) -> str:
     prevention, but an unexplained silence is visible on the dashboard."""
     if not agent['last_seen']:
         return 'never connected'
-    last_seen = datetime.fromisoformat(agent['last_seen'])
+    try:
+        last_seen = _utc_aware(datetime.fromisoformat(agent['last_seen']))
+    except (TypeError, ValueError):
+        return 'offline'
     threshold = timedelta(seconds=2 * config.AGENT_HEARTBEAT_SECONDS)
     return 'online' if (datetime.now(timezone.utc) - last_seen) <= threshold else 'offline'
 
@@ -462,8 +534,8 @@ def api_agents():
     dashboard route - the token this returns is what lets a worker forward
     events at all, so only the signed-in admin should ever mint one."""
     if request.method == 'POST':
-        body = request.get_json(silent=True) or {}
-        name = (body.get('name') or '').strip()
+        name = _json_body().get('name')
+        name = name.strip() if isinstance(name, str) else ''
         if not name:
             return jsonify({'error': 'name is required'}), 400
         try:
@@ -510,8 +582,14 @@ def api_ingest():
         return jsonify({'error': 'invalid or missing agent token'}), 401
     touch_agent_last_seen(agent['id'])
 
-    body = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True)
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return jsonify({'error': 'body must be a JSON object'}), 400
     events = body.get('events') or []
+    if not isinstance(events, list):
+        return jsonify({'error': "'events' must be a list"}), 400
     if len(events) > config.AGENT_INGEST_BATCH_LIMIT:
         return jsonify({
             'error': f'batch of {len(events)} exceeds AGENT_INGEST_BATCH_LIMIT '
@@ -520,10 +598,16 @@ def api_ingest():
 
     processed = 0
     for event in events:
+        if not isinstance(event, dict):
+            continue
         try:
+            # Missing/garbage time: use arrival time rather than dropping the
+            # event or letting a None reach the correlator's window arithmetic.
             when = event.get('time')
-            if isinstance(when, str):
-                event['time'] = datetime.fromisoformat(when)
+            try:
+                event['time'] = _utc_aware(datetime.fromisoformat(when))
+            except (TypeError, ValueError):
+                event['time'] = datetime.now(timezone.utc)
 
             # Attribution comes from the authenticated agent, never from the
             # payload. The token proves *which enrolled worker* is talking;
